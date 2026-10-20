@@ -11,8 +11,12 @@
   },
   "files": [
     "lib",
+    "assets",
     "cordis.patch.yml",
     "README.md",
+    "安装与功能说明.md",
+    "功能介绍.md",
+    "screenshots.json",
     "LICENSE"
   ],
   "engines": {
