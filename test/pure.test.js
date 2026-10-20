@@ -229,6 +229,52 @@ test('isSubagent 认得四种标记', () => {
   assert.equal(isSubagent({ role: 'subagent' }), true)
 })
 
+// 这条是 2026-10-20 线上反馈的回归测试：
+// 在「分支会话」里一切播报都被拦掉，自检 skipped.subagent 涨到 27 万。
+// 根因是曾经把「有 parentSession」当成子代理，而分支会话也有 parentSession。
+test('isSubagent 不把分支会话当成子代理', () => {
+  // 分支会话（一手实证）：origin 缺失、有 parentSession、isSeeded=true、depth=0
+  const branch = {
+    session: {
+      header: {
+        id: 'session-d5d4f68e-0a40-4d4b-a3cd-cac593be404b',
+        parentSession: 'session-0b3b6f81-0aa5-48f5-8725-a236a1dd58d6',
+        isSeeded: true,
+        delegationDepth: 0,
+      },
+    },
+  }
+  assert.equal(isSubagent(branch), false, '分支会话是用户正常查看的主会话，不能被子代理判据拦掉')
+
+  // 同一份头，但缺 delegationDepth：仍然不是子代理（origin 才是唯一可靠判据）
+  const branchNoDepth = {
+    session: { header: { parentSession: 'session-parent', isSeeded: true } },
+  }
+  assert.equal(isSubagent(branchNoDepth), false, '没有 origin=subagent 就不该判为子代理')
+})
+
+test('isSubagent 认得真子代理', () => {
+  // 真子代理（一手实证）：origin='subagent'、delegationDepth=1
+  const sub = {
+    session: {
+      header: {
+        id: 'a183d5f3-3ddc-4f9d-8869-a06eb4dbbe7c',
+        origin: 'subagent',
+        parentSession: 'session-c7c101e9-c250-451a-b7a1-130ab75a8d49',
+        isSeeded: false,
+        delegationDepth: 1,
+      },
+    },
+  }
+  assert.equal(isSubagent(sub), true)
+
+  // 只有 depth 没有 origin：也按子代理算（宿主对子代理会写 depth>=1）
+  const depthOnly = {
+    session: { header: { parentSession: 'session-parent', delegationDepth: 2 } },
+  }
+  assert.equal(isSubagent(depthOnly), true, '有 parentSession 且 delegationDepth>0，是子代理')
+})
+
 test('isSubagent 不误判主代理与脏数据', () => {
   assert.equal(isSubagent({}), false)
   assert.equal(isSubagent({ parent: null }), false)

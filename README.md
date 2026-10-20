@@ -97,7 +97,7 @@ cp -r dsh-narrator ~/.dsh/profiles/desktop/node_modules/dsh-narrator
 
 ```bash
 curl http://127.0.0.1:<端口>/api/narrator/status
-# {"ok":true,"version":"0.12.3",...}
+# {"ok":true,"version":"0.12.4",...}
 ```
 
 端口看 DSH 窗口地址栏。这个路由只在 `127.0.0.1` 上响应，外部访问不到。
@@ -222,7 +222,7 @@ bottom ← overlayLayer 底边 − [data-composer-seat] 顶边 + 16px
 2. **汇报原文本身不算「新正文」。** 写浮窗记录时会把「当时的最后一次正文时刻」冻结进记录（`textAt` 字段），前端比的是「记录之后又说过话没有」。所以不会出现「模型刚写完汇报，浮窗一闪就消失」。
 3. **叉掉就是叉掉。** 关闭状态按「哪一条汇报」记（记录的 `at`）：切走再切回同一条汇报不再弹出，等下一条新汇报才重新出现，不会变成永久失聪。子代理的输出也进不了这个判据——等子任务那几分钟恰恰最需要这张卡。
 
-第 1 条的判据在服务端，所以**升级到 v0.12.3 后必须重启 DSH 进程**（不只是刷新页面）才会生效。前端会回落到 `at` 兜底，功能不坏，但对「模型中途说了句话」不如新版敏感。
+第 1 条的判据在服务端，所以**升级到 v0.12.4 后必须重启 DSH 进程**（不只是刷新页面）才会生效。前端会回落到 `at` 兜底，功能不坏，但对「模型中途说了句话」不如新版敏感。
 
 ### 运行期自检
 
@@ -235,7 +235,7 @@ GET /api/narrator/status
 ```json
 {
   "ok": true,
-  "version": "0.12.3",
+  "version": "0.12.4",
   "config": { "silentSeconds": 60, "cooldownSeconds": 60, "lingerSeconds": 90 },
   "stats": {
     "startFrames": 41, "chunkFrames": 22793, "endFrames": 41,
