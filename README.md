@@ -95,7 +95,7 @@ cp -r dsh-narrator ~/.dsh/profiles/desktop/node_modules/dsh-narrator
 
 ```bash
 curl http://127.0.0.1:<端口>/api/narrator/status
-# {"ok":true,"version":"0.12.2",...}
+# {"ok":true,"version":"0.12.3",...}
 ```
 
 端口看 DSH 窗口地址栏。这个路由只在 `127.0.0.1` 上响应，外部访问不到。
@@ -223,7 +223,7 @@ GET /api/narrator/status
 ```json
 {
   "ok": true,
-  "version": "0.12.2",
+  "version": "0.12.3",
   "config": { "silentSeconds": 60, "cooldownSeconds": 60, "lingerSeconds": 90 },
   "stats": {
     "startFrames": 41, "chunkFrames": 22793, "endFrames": 41,
