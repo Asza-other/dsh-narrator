@@ -240,12 +240,13 @@ GET /api/narrator/status
 
 也可以直接跑 `node test/check-status.mjs <端口>`，它会打印人话诊断。
 
-### 测试的四条铁律
+### 测试的五条铁律
 
 1. **必须隔离配置。** 所有测试都要在 `import` 插件**之前**设 `process.env.DSH_NARRATOR_CONFIG`，否则用户真实配置会污染断言（曾因此 12 项假失败）。
 2. **`node --test test/` 会失败**，必须显式列出文件。
 3. **断言不许用 `?.` 包住核心判断。** 曾写 `ctx._latestBySession?.set?.()` 这种不存在的对象，断言静默跳过，测试绿着但什么都没验。
 4. **浮层测试必须清定时器。** 组件里有 `setInterval`，不清理 node 永不退出。
+5. **CSS 修复要能拦住「改回去」。** 修完 bug 顺手把变异试一遍——删掉关键声明、把数值调小、换成被否决的写法，测试都必须失败。设置卡底栏那条缝就是这么验的（见 `test/client-render.test.mjs` 里 `.narr-foot` 的 box-shadow 断言）。
 
 ---
 
