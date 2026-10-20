@@ -603,14 +603,16 @@ assert.ok(!shown.text.includes('正在做：'), '不应再出现插件拼接的�
   })
   assert.equal(gone.tree, null, '任务已结束且超过停留时长后应自动消散')
 
-  // 同样很久，但任务还在跑 → 继续挂着（用户随时切回窗口都该看到）
+  // 同样很久，任务还在跑，但模型**没有**再开口 → 继续挂着
+  // （用户随时切回窗口都该看到；这条是「任务在跑就一直挂」的正当场景）
   const stillRunning = await mountOverlay({
     enabled: true,
     lingerSeconds: linger,
     records: [rec({ at: Date.now() - 10 * 60 * 1000 })],
     runningMap: { 'sess-1': true },
+    textAtMap: {},
   })
-  assert.ok(stillRunning.tree, '任务仍在运行时，即使汇报已久也应继续显示')
+  assert.ok(stillRunning.tree, '任务仍在跑且模型没再说话时，即使汇报已久也应继续显示')
 
   // 刚汇报完、任务已结束、但还在停留期内 → 仍显示
   const lingerWindow = await mountOverlay({
@@ -620,6 +622,111 @@ assert.ok(!shown.text.includes('正在做：'), '不应再出现插件拼接的�
     runningMap: { 'sess-1': false },
   })
   assert.ok(lingerWindow.tree, '停留期内不该消散')
+}
+
+// ---- 主窗口又说了正文 → 立刻撤卡 -----------------------------------------
+/**
+ * 用户实测反馈：任务一直在跑，模型早就输出了一大段正文，浮窗却还挂着不消失，
+ * 而且叉掉后切走再切回又冒出来。
+ *
+ * 根因有两个：
+ *   1. 消失条件写的是 `!pending && !running && 超时`——`running` 让长任务
+ *      期间**永不**撤卡，90 秒停留形同虚设。
+ *   2. 有一个 `useEffect(() => setClosedAt(0), [viewingSession])`，切换会话
+ *      就把「已关闭」清掉，叉按钮等于白点。
+ */
+{
+  const now = Date.now()
+  const session = 'sess-1'
+
+  // ① 模型在写这条汇报之后又说了正文 → 撤
+  const spokeAfter = await mountOverlay({
+    enabled: true,
+    records: [rec({ at: now - 60_000, textAt: now - 90_000 })],
+    runningMap: { [session]: true },
+    textAtMap: { [session]: now },
+  })
+  assert.equal(
+    spokeAfter.tree,
+    null,
+    '主窗口在汇报之后又输出过正文时，浮窗必须撤掉——不能因为任务还在跑就永远挂着',
+  )
+
+  // ② 只有恰好等于记录里的 textAt（就是汇报原文本身）→ 不撤
+  const selfOnly = await mountOverlay({
+    enabled: true,
+    records: [rec({ at: now - 60_000, textAt: now - 60_000 })],
+    runningMap: { [session]: true },
+    textAtMap: { [session]: now - 60_000 },
+  })
+  assert.ok(
+    selfOnly.tree,
+    '汇报原文本身就是一串 text-delta，它不能被自己撤掉——否则浮窗刚亮就消失',
+  )
+
+  // ③ 记录里没有 textAt（旧服务端）→ 回落到 at，行为不变
+  const legacy = await mountOverlay({
+    enabled: true,
+    records: [rec({ at: now - 60_000 })],
+    runningMap: { [session]: true },
+    textAtMap: { [session]: now - 120_000 },
+  })
+  assert.ok(legacy.tree, '记录里缺 textAt 时应回落用 at 比较，不能凭空撤卡')
+
+  // ④ 别的会话在说话，不影响本会话
+  const otherSessionTalks = await mountOverlay({
+    enabled: true,
+    records: [rec({ at: now - 60_000, textAt: now - 60_000 })],
+    runningMap: { [session]: true },
+    textAtMap: { 'sess-2': now },
+  })
+  assert.ok(otherSessionTalks.tree, '别的会话输出正文不该撤掉本会话的浮窗')
+
+  // ⑤ 子代理的输出进不了 textAtMap（服务端在子会话上就 return），
+  //    所以「主窗口在等子代理」这段仍会显示——这正是最需要它的时候。
+  const waitingSubagent = await mountOverlay({
+    enabled: true,
+    records: [
+      rec({
+        at: now - 60_000,
+        textAt: now - 60_000,
+        pending: true,
+        phase: 'working',
+        waiting: '正在等子任务返回',
+        waitingTool: 'subagent',
+      }),
+    ],
+    runningMap: { [session]: true },
+    waitingMap: { [session]: { label: '正在等子任务返回', tool: 'subagent', startedAt: now - 120_000 } },
+    textAtMap: { [session]: now - 60_000 },
+  })
+  assert.ok(waitingSubagent.tree, '等子代理期间没有主窗口正文，浮窗应继续显示')
+  assert.ok(waitingSubagent.text.includes('还在等'), `实际：${waitingSubagent.text}`)
+}
+
+// ---- 叉掉后切走再切回，同一条汇报不再出现 -------------------------------
+/**
+ * `mountOverlay` 每次都是全新挂载（hooks 从头来），模拟不了「同一个组件实例
+ * 里切换 viewingSession」。所以这里直接断言源码里没有那个清零 effect——
+ * 它是这个 bug 的唯一来源，删掉了行为就对。
+ */
+{
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // 先剥掉注释再判断：源码里那段注释就在讲「曾经这么写过，现在不写了」，
+  // 不剥会把解释文字当成代码，测试反过来冤枉自己。
+  const code = src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+  assert.ok(
+    !/setClosedAt\(0\)/.test(code),
+    '不得在会话切换时把 closedAt 清零：那会让用户叉掉的浮窗在切回来时又冒出',
+  )
+  // 关闭仍然要按「哪一条汇报」记，否则关一次就永久失聪
+  assert.ok(
+    /setClosedAt\(latest\.at\)/.test(code),
+    '关闭要按该条汇报的 at 记，新汇报（at 变了）才重新出现',
+  )
 }
 
 // ---- 右上角关闭 -----------------------------------------------------------
