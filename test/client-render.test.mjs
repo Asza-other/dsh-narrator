@@ -1,0 +1,697 @@
+/**
+ * 客户端组件渲染探针（v0.11.0 重写）
+ *
+ * 用一个迷你 React 桩真实跑一遍组件树，确认：
+ *   - 设置卡结构 = 两个勾选开关 + 两个分钟行 + 透明度 + 停留时长 + 提示词框 + 测试区
+ *   - 浮层渲染 = 模型那段原文（不拼模板）、按会话隔离、停留 N 秒后消散
+ *
+ * 桩的关键点：`createElement` 遇到函数组件就**立即调用展开**（这正是真实
+ * React 渲染时做的事），这样每次完整渲染的 hooks 顺序与索引自然对齐。
+ *
+ * 历史教训（都还在生效）：
+ *   - 浮层里挂了 setInterval，不清理会让 node 永远不退出 → mountOverlay 末尾必须清
+ *   - setState 只改 HOOKS.list，必须**再渲染一次**才能看到新树（rerender 不重置索引）
+ *   - 断言里不要用 `?.` 包住核心判断，否则对象不存在时断言静默跳过
+ */
+import assert from 'node:assert/strict'
+
+// ---- 迷你 React 桩 ---------------------------------------------------------
+const HOOKS = { list: [], i: 0, pending: [], disposers: [] }
+
+const React = {
+  createElement(type, props, ...children) {
+    const merged = {
+      ...(props ?? {}),
+      children: children.length === 0 ? undefined : children.length === 1 ? children[0] : children,
+    }
+    // 函数组件立即展开，等价于 React 渲染
+    if (typeof type === 'function') return type(merged)
+    return { type, props: merged }
+  },
+  useState(initial) {
+    const i = HOOKS.i++
+    if (!(i in HOOKS.list)) HOOKS.list[i] = initial
+    return [HOOKS.list[i], (v) => (HOOKS.list[i] = typeof v === 'function' ? v(HOOKS.list[i]) : v)]
+  },
+  useEffect(fn) {
+    HOOKS.i++
+    HOOKS.pending.push(fn)
+  },
+  useRef(initial) {
+    const i = HOOKS.i++
+    if (!(i in HOOKS.list)) HOOKS.list[i] = { current: initial }
+    return HOOKS.list[i]
+  },
+  useCallback(fn) {
+    HOOKS.i++
+    return fn
+  },
+  useMemo(fn) {
+    HOOKS.i++
+    return fn()
+  },
+}
+
+// ---- 捕获注册 -------------------------------------------------------------
+/** 所有 slot 注册（设置卡 + 浮层）。 */
+const registrations = []
+/** 模块本体，用来拿 `__internal`（宿主的几何计算没法靠渲染树断言）。 */
+let clientModule = null
+globalThis.window = {
+  __ModuleLoader__: {
+    load(spec) {
+      const mod = spec.factory((name) => {
+        if (name === 'react') return React
+        throw new Error(`unexpected require: ${name}`)
+      })
+      clientModule = mod
+      const ctx = {
+        slots: {
+          inject(name, cb) {
+            const entry = cb()
+            entry.__slot = name
+            registrations.push(entry)
+          },
+          register(options, Component) {
+            return { options, Component }
+          },
+        },
+      }
+      mod.apply(ctx)
+    },
+  },
+}
+
+await import('../lib/client.js')
+
+const settingsEntry = registrations.find((r) => r.__slot === 'settings.section')
+const overlayEntry = registrations.find((r) => r.__slot === 'shell.overlay')
+
+assert.ok(settingsEntry, 'client 应注册 settings.section')
+assert.equal(settingsEntry.options.id, 'narrator')
+assert.equal(typeof settingsEntry.options.label, 'function')
+assert.equal(settingsEntry.options.label(), '进度旁白')
+
+assert.ok(overlayEntry, 'client 应注册 shell.overlay')
+assert.equal(overlayEntry.options.name, 'shell.overlay')
+assert.equal(overlayEntry.options.id, 'narrator-progress')
+
+/** 只渲染一次，返回展开后的 DOM 节点树（函数组件已被 createElement 展开）。 */
+function renderOnce() {
+  HOOKS.i = 0
+  HOOKS.pending = []
+  return settingsEntry.Component({})
+}
+
+/** 重渲染但**不重置** hooks 列表 —— 相当于 React 的一次重新渲染。 */
+function rerender() {
+  HOOKS.i = 0
+  HOOKS.pending = []
+  return settingsEntry.Component({})
+}
+
+/** 跑一遍本轮渲染收集到的 effect（同步部分）。 */
+function runEffects() {
+  const fns = HOOKS.pending
+  HOOKS.pending = []
+  for (const fn of fns) {
+    const dispose = fn()
+    if (typeof dispose === 'function') HOOKS.disposers.push(dispose)
+  }
+}
+
+/** 收集所有宿主 DOM 节点。 */
+const collect = (node, out = []) => {
+  if (node === null || node === undefined || typeof node !== 'object') return out
+  out.push(node)
+  const kids = node.props?.children
+  if (Array.isArray(kids)) for (const k of kids) collect(k, out)
+  else if (kids && typeof kids === 'object') collect(kids, out)
+  return out
+}
+
+/** 取整棵树的纯文本（用于文案断言）。 */
+const textOf = (node) => {
+  if (node === null || node === undefined) return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (typeof node !== 'object') return ''
+  const kids = node.props?.children
+  if (Array.isArray(kids)) return kids.map(textOf).join(' ')
+  return textOf(kids)
+}
+
+/**
+ * 挂载设置卡：反复渲染直到状态稳定（fetch 的 setState 要一轮，
+ * MinuteRow 内部「draft 跟随 value」的 effect 又要再一轮）。
+ */
+async function mount(config) {
+  HOOKS.list = []
+  HOOKS.disposers = []
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ ok: true, config }) })
+  let tree = null
+  for (let i = 0; i < 8; i += 1) {
+    tree = renderOnce()
+    runEffects()
+    await new Promise((r) => setTimeout(r, 0))
+  }
+  tree = renderOnce()
+  return { tree, nodes: collect(tree), text: textOf(tree) }
+}
+
+const config = {
+  enabled: true,
+  overlayEnabled: true,
+  showInjected: false,
+  overlayOpacity: 1,
+  overlayOpacityMin: 0.35,
+  overlayOpacityMax: 1,
+  silentSeconds: 300,
+  silentMinutes: 5,
+  cooldownSeconds: 300,
+  cooldownMinutes: 5,
+  normalSilentSeconds: 300,
+  normalCooldownSeconds: 300,
+  testMode: false,
+  testSilentSeconds: 5,
+  testCooldownSeconds: 10,
+  testSecondsMin: 1,
+  testSecondsMax: 60,
+  maxPerTurn: 0,
+  lingerSeconds: 90,
+  includeSubagents: true,
+  prompt: null,
+  defaultPrompt: '（内置默认提示词）',
+  defaults: {
+    silentSeconds: 60,
+    cooldownSeconds: 60,
+    maxPerTurn: 0,
+    lingerSeconds: 90,
+    prompt: null,
+    enabled: true,
+    overlayEnabled: true,
+    showInjected: false,
+    includeSubagents: true,
+    overlayOpacity: 1,
+    testMode: false,
+    testSilentSeconds: 5,
+    testCooldownSeconds: 10,
+  },
+}
+
+const { tree, nodes, text } = await mount(config)
+
+// ---- 基本结构 -------------------------------------------------------------
+assert.equal(tree.type, 'div')
+assert.equal(tree.props.className, 'narr-root')
+
+const styleNode = nodes.find((n) => n.type === 'style')
+assert.ok(styleNode, '应渲染样式')
+assert.ok(styleNode.props.children.includes('.narr-root'), '样式应包含根类')
+
+// 保存/恢复默认固定在卡片下沿：设置项一多，滚到底改完再滚回去找按钮太折腾。
+// 用 sticky 而不是给宿主的滚动容器写死定位——不用知道容器是谁。
+assert.ok(
+  /\.narr-foot\s*\{[^}]*position:\s*sticky/.test(styleNode.props.children),
+  '底部按钮栏必须 sticky 固定在设置卡下沿，不随内容滚走',
+)
+assert.ok(
+  /\.narr-foot\s*\{[^}]*bottom:\s*0/.test(styleNode.props.children),
+  'sticky 要贴住下沿',
+)
+assert.ok(
+  /\.narr-foot\s*\{[^}]*background:/.test(styleNode.props.children),
+  'sticky 栏必须有底色，否则内容会从按钮缝里透出来',
+)
+
+assert.ok(text.includes('分钟'), '界面文案必须出现「分钟」')
+assert.ok(text.includes('多久没有文字输出就让它说一句'), '应有静默时长项')
+assert.ok(text.includes('两次汇报至少间隔'), '应有间隔项')
+
+// v0.11.0 不再有「旁白形态」三选一，也不该有「两个通道」下拉：
+// 机制变成「注入提示词让模型自己说」，两条通道折成两个勾选开关。
+assert.ok(!text.includes('两个通道'), '两个通道下拉已删除')
+assert.ok(!text.includes('旁白说什么'), '旁白形态下拉已删除')
+assert.equal(
+  nodes.filter((n) => n.type === 'select').length,
+  0,
+  '设置卡不应使用原生 select',
+)
+assert.equal(
+  nodes.filter((n) => n.props?.['aria-haspopup'] === 'listbox').length,
+  0,
+  'v0.11.0 的设置卡不再有下拉框',
+)
+
+// ---- 两个独立勾选开关 -----------------------------------------------------
+const checkboxes = nodes.filter((n) => n.type === 'input' && n.props?.type === 'checkbox')
+assert.ok(checkboxes.length >= 2, `至少两个勾选开关，实际 ${checkboxes.length}`)
+assert.ok(text.includes('让模型定期汇报'), '主开关文案')
+assert.ok(text.includes('同时把汇报内容弹到对话区左下角浮窗'), '浮窗开关文案')
+// 默认配置下两个都该是勾上的
+assert.equal(checkboxes.filter((c) => c.props.checked === true).length >= 2, true, '默认两个开关都开')
+
+// ---- 分钟滑杆：线性、1~60、步进 1 ----------------------------------------
+const ranges = nodes.filter((n) => n.type === 'input' && n.props?.type === 'range')
+// 分钟 x2 + 透明度 x1 + 浮窗停留 x1 + 测试区 x2 = 6
+assert.equal(ranges.length, 6, `应有六个滑杆，实际 ${ranges.length}`)
+
+// 分钟滑杆和测试区滑杆的 min/max 都是 1~60，只能靠 aria-valuetext 区分
+// （MinuteRow 用「5 分钟」，TestRow 用「5 秒」）。
+const minuteRanges = ranges.filter((r) => String(r.props['aria-valuetext']).includes('分钟'))
+// 秒级滑杆有三个：浮窗停留时长 + 测试区两个（都复用 TestRow，量程一致）
+const testRanges = ranges.filter((r) => String(r.props['aria-valuetext']).includes('秒'))
+assert.equal(minuteRanges.length, 2, `应有两个分钟滑杆，实际 ${minuteRanges.length}`)
+assert.equal(testRanges.length, 3, `应有三个秒级滑杆（停留 + 测试x2），实际 ${testRanges.length}`)
+for (const r of minuteRanges) {
+  assert.equal(r.props.min, 1, '滑杆下限必须是 1 分钟')
+  assert.equal(r.props.max, 60, '滑杆上限必须是 60 分钟')
+  assert.equal(r.props.step, 1, '滑杆刻度必须是 1 分钟')
+  assert.ok(Number.isInteger(r.props.value), `滑杆值应为整数分钟，实际 ${r.props.value}`)
+}
+// 线性刻度：300 秒 = 位置 5（不是 0~1000 的对数位置）
+assert.equal(minuteRanges[0].props.value, 5, '300 秒应映射到滑杆位置 5（线性）')
+
+// ---- 分钟用数字输入框，不是下拉档位 --------------------------------------
+const nums = nodes.filter(
+  (n) => n.type === 'input' && n.props?.type === 'number' && n.props?.className === 'narr-numinput',
+)
+// 分钟 x2 + 浮窗停留 x1 + 测试 x2 = 5
+assert.equal(nums.length, 5, `应有五个数字输入框，实际 ${nums.length}`)
+
+// 分钟框靠 aria-label 后缀区分（TestRow 也是 min=1 max=60，不能靠量程区分）
+const minuteNums = nums.filter((n) => String(n.props['aria-label']).endsWith('（分钟）'))
+assert.equal(minuteNums.length, 2, `应有两个分钟数字框，实际 ${minuteNums.length}`)
+for (const n of minuteNums) {
+  assert.equal(n.props.step, 1, '数字框步进必须是 1 分钟')
+  assert.ok(/^\d+$/.test(String(n.props.value)), `数字框初值应为整数分钟，实际「${n.props.value}」`)
+}
+assert.equal(Number(minuteNums[0].props.value), 5, '300 秒应显示成 5 分钟')
+assert.equal(typeof minuteNums[0].props.onChange, 'function', '数字框必须可输入')
+assert.equal(typeof minuteNums[0].props.onBlur, 'function', '数字框失焦要夹紧范围')
+assert.ok(!/0\.\d+ 分钟/.test(text), '界面不应出现小数分钟')
+
+// ---- 刻度标注 -------------------------------------------------------------
+const scales = nodes.filter((n) => n.props?.className === 'narr-scale')
+assert.equal(scales.length, 6, `六个滑杆都应标注量程，实际 ${scales.length}`)
+const minuteScales = scales.filter((s) => textOf(s).includes('分钟'))
+assert.equal(minuteScales.length, 2, '两个分钟滑杆要标注量程')
+for (const s of minuteScales) {
+  assert.ok(textOf(s).includes('1 分钟'), `刻度起点应为 1 分钟，实际：${textOf(s)}`)
+  assert.ok(textOf(s).includes('60 分钟'), `刻度终点应为 60 分钟，实际：${textOf(s)}`)
+}
+
+// ---- 浮窗透明度：0.35~1，排在「测试」之前 --------------------------------
+{
+  const opacityRange = ranges.find((n) => n.props['aria-label'] === '浮窗透明度')
+  assert.ok(opacityRange, '设置卡应有「浮窗透明度」滑杆')
+  assert.equal(opacityRange.props.min, 0.35, '透明度下限 0.35')
+  assert.equal(opacityRange.props.max, 1, '透明度上限 1')
+  assert.equal(opacityRange.props.step, 0.05, '透明度刻度 0.05')
+  assert.equal(Number(opacityRange.props.value), 1, '默认完全不透明')
+
+  const labels = nodes.filter((n) => n.props?.className === 'narr-label').map((n) => textOf(n))
+  const opacityAt = labels.indexOf('浮窗透明度')
+  const testAt = labels.indexOf('测试')
+  assert.ok(opacityAt >= 0, '应有「浮窗透明度」标签')
+  assert.ok(testAt >= 0, '应有「测试」标签')
+  assert.ok(opacityAt < testAt, '透明度要放在测试的上面')
+}
+
+// ---- 浮窗停留时长：秒级数字框 + 滑杆 ------------------------------------
+{
+  const lingerNum = nums.find((n) => String(n.props['aria-label']).includes('浮窗停留'))
+  assert.ok(lingerNum, '应有「浮窗停留多久后自动消失」数字框')
+  assert.ok(text.includes('浮窗停留多久后自动消失'), '停留时长文案')
+  assert.equal(Number(lingerNum.props.value), 90, '默认 90 秒')
+}
+
+// ---- 提示词可编辑 ---------------------------------------------------------
+{
+  const area = nodes.find((n) => n.type === 'textarea' && n.props?.className === 'narr-textarea')
+  assert.ok(area, '应有一个提示词文本框')
+  assert.equal(typeof area.props.onChange, 'function', '提示词必须可编辑')
+  assert.equal(area.props.placeholder, '（内置默认提示词）', '空值时应显示内置默认作为 placeholder')
+  assert.ok(text.includes('汇报内容怎么给模型说'), '提示词区块标题')
+  assert.ok(text.includes('在对话里显示这条提示词'), '应有「显示注入原文」开关')
+  assert.ok(text.includes('子任务里也照样汇报'), '应有子代理开关')
+}
+
+// ---- 测试区块 -------------------------------------------------------------
+{
+  const block = nodes.find((n) => n.type === 'div' && n.props?.className === 'narr-test')
+  assert.ok(block, '设置卡底部应有「测试」区块')
+  const inner = collect(block)
+  const testNums = inner.filter(
+    (n) => n.type === 'input' && n.props?.type === 'number' && n.props?.className === 'narr-numinput',
+  )
+  assert.equal(testNums.length, 2, `测试区块应有 2 个秒级数字框，实际 ${testNums.length}`)
+  for (const n of testNums) {
+    assert.equal(n.props.min, 1, '测试秒数下限 1')
+    assert.equal(n.props.max, 60, '测试秒数上限 60')
+    assert.ok(String(n.props['aria-label']).endsWith('（秒）'), '测试框单位是秒')
+  }
+  assert.ok(text.includes('用秒级阈值试一下'), '测试开关文案')
+}
+
+// ---- 边界：低于最小档的配置先夹到 1 分钟，并给出说明 --------------------
+{
+  const { text: t, nodes: ns } = await mount({ ...config, silentSeconds: 10, silentMinutes: 0.17, normalSilentSeconds: 10 })
+  const rs = ns.filter((n) => n.type === 'input' && n.props?.type === 'range')
+  assert.equal(rs[0].props.value, 1, '低于最小档的配置应夹到 1 分钟显示')
+  assert.ok(t.includes('10 秒'), '应指出当前配置是 10 秒')
+  assert.ok(t.includes('按 1 分钟生效'), '应说明保存后会按最小档 1 分钟生效')
+}
+
+// ---- 边界：超过上限的配置夹到 60 分钟 -----------------------------------
+{
+  const { nodes: ns } = await mount({ ...config, silentSeconds: 7200, silentMinutes: 120, normalSilentSeconds: 7200 })
+  const rs = ns.filter((n) => n.type === 'input' && n.props?.type === 'range')
+  assert.equal(rs[0].props.value, 60, '超过上限的配置应夹到 60 分钟')
+}
+
+// ---- fetch 失败时不应抛 --------------------------------------------------
+{
+  HOOKS.list = []
+  HOOKS.disposers = []
+  globalThis.fetch = async () => ({ ok: false, json: async () => ({}) })
+  renderOnce()
+  runEffects()
+  await new Promise((r) => setTimeout(r, 0))
+  assert.ok(textOf(renderOnce()).includes('读不到插件配置'), '读配置失败应给出提示')
+}
+
+// ===========================================================================
+// 浮层
+// ===========================================================================
+{
+  globalThis.ResizeObserver = class {
+    constructor(cb) {
+      this.cb = cb
+    }
+    observe() {}
+    disconnect() {}
+  }
+  globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0)
+  globalThis.cancelAnimationFrame = (id) => clearTimeout(id)
+}
+
+/**
+ * 挂载浮层：首渲染 → 跑 effect（fetch）→ 等微任务 → 重渲染。
+ *
+ * `session` 是「用户当前正在看的会话 id」。浮层靠它从 records 里挑自己那条，
+ * 所以测试必须模拟宿主写在 `[data-conversation-session]` 上的属性。
+ */
+const mountOverlay = async (payload, session = 'sess-1') => {
+  HOOKS.list = []
+  HOOKS.disposers = []
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ ok: true, ...payload }) })
+  globalThis.document = {
+    querySelector: (sel) =>
+      sel === '[data-conversation-session]' ? { getAttribute: () => session } : null,
+    // `measureSeat()` 与它上面的 ResizeObserver 都会枚举同名节点（宿主 DOM 里
+    // `[data-chat-flow]` 不止一处，不能只取第一个）。桩里一律返回空列表，
+    // 让 measureSeat 走到兜底分支，测的是「不崩」而不是真实布局。
+    querySelectorAll: () => [],
+    body: null,
+  }
+  if (typeof globalThis.window !== 'object' || globalThis.window === null) globalThis.window = {}
+  globalThis.window.addEventListener = () => {}
+  globalThis.window.removeEventListener = () => {}
+  globalThis.MutationObserver = class {
+    observe() {}
+    disconnect() {}
+  }
+  HOOKS.i = 0
+  HOOKS.pending = []
+  overlayEntry.Component({})
+  runEffects()
+  await new Promise((r) => setTimeout(r, 0))
+  HOOKS.i = 0
+  HOOKS.pending = []
+  const tree = overlayEntry.Component({})
+  // 浮层里挂了 setInterval，不清理会让 node 永远等下去
+  for (const dispose of HOOKS.disposers) dispose()
+  HOOKS.disposers = []
+  return { tree, nodes: collect(tree), text: textOf(tree) }
+}
+
+/** 一条浮层记录（v0.11.0 结构：只有模型原文，没有模板字段）。 */
+const rec = (extra = {}) => ({
+  session: 'sess-1',
+  text: '我把几个候选插件的 README 读完了，正在核对他们各自挂的是哪个钩子。',
+  turn: 3,
+  step: 7,
+  at: Date.now(),
+  silentSeconds: 120,
+  ...extra,
+})
+
+const empty = await mountOverlay({ enabled: true, records: [] })
+assert.equal(empty.tree, null, '还没汇报过时浮层不应渲染任何东西')
+
+const shown = await mountOverlay({ enabled: true, records: [rec()], runningMap: { 'sess-1': true } })
+assert.ok(shown.tree, '有汇报时应渲染浮层')
+assert.equal(shown.tree.props.className, 'narr-overlay')
+assert.ok(shown.text.includes('正在汇报'), '浮层标题')
+assert.ok(shown.text.includes('约 120 秒没说话'), '浮层应报静默时长')
+assert.ok(shown.text.includes('第 7 步'), '浮层应报当前步数')
+// 正文就是模型原文，不拼模板、不改写
+assert.ok(
+  shown.text.includes('我把几个候选插件的 README 读完了'),
+  `正文必须是模型那段原文，实际：${shown.text}`,
+)
+assert.ok(!shown.text.includes('正在做：'), '不应再出现插件拼接的模板句')
+
+// ---- 浮窗透明度跟着后端下发 ----------------------------------------------
+{
+  const dim = await mountOverlay({ enabled: true, overlayOpacity: 0.6, records: [rec()], runningMap: { 'sess-1': true } })
+  assert.equal(dim.tree.props.style['--narr-overlay-opacity'], '0.6', '透明度应取自后端')
+  const full = await mountOverlay({ enabled: true, overlayOpacity: 1, records: [rec()], runningMap: { 'sess-1': true } })
+  assert.equal(full.tree.props.style['--narr-overlay-opacity'], '1', '默认完全不透明')
+}
+
+// ---- 配色与定位（踩过的坑，必须锁住）------------------------------------
+{
+  const overlayStyle = shown.nodes.find((n) => n.type === 'style')
+  assert.ok(overlayStyle, '浮层应自带样式')
+  assert.ok(
+    !overlayStyle.props.children.includes('--dsw-alias-bg-elevated'),
+    '不得使用宿主不存在的 --dsw-alias-bg-elevated（会导致黑底黑字）',
+  )
+  assert.ok(overlayStyle.props.children.includes('--dsw-alias-bg-layer-1'), '背景应使用宿主真实存在的主题变量')
+  assert.ok(!overlayStyle.props.children.includes('position:fixed'), '浮层不得用 fixed 定位（会压住输入框）')
+  assert.ok(overlayStyle.props.children.includes('position:absolute'), '浮层应相对 overlayLayer 用 absolute 定位')
+  assert.ok(
+    overlayStyle.props.children.includes('body[data-ds-dark-theme]'),
+    '样式必须含 body[data-ds-dark-theme] 分支，否则夜间模式下兜底色是白底白字',
+  )
+  assert.ok(overlayStyle.props.children.includes('#232324'), '夜间分支应给出深色底')
+  assert.ok(overlayStyle.props.children.includes('transition:left'), '位置变化要有过渡')
+
+  assert.ok(/^\d+(\.\d+)?px$/.test(shown.tree.props.style.left), `left 应是像素值，实际 ${shown.tree.props.style.left}`)
+  assert.ok(/^\d+(\.\d+)?px$/.test(shown.tree.props.style.bottom), `bottom 应是像素值，实际 ${shown.tree.props.style.bottom}`)
+}
+
+// ---- 浮窗水平对齐：必须挑主对话列，不能被侧栏那份骗走 ---------------------
+/**
+ * 这是「浮窗跑到左下角」那个 bug 的回归测试。
+ *
+ * 宿主 DOM 里 `[data-chat-flow]` 有多份（主聊天列 + `ChatGroupSeat` 里的
+ * 工作步骤面板各一份）。用 `document.querySelector` 只拿第一个，一旦命中
+ * 侧栏那份（左边界贴近窗口边缘），`left` 会算出个极小的值，浮窗就贴到
+ * 整个窗口最左边、压住侧边栏。正确做法是筛掉侧栏/步骤面板、取最宽的那个。
+ */
+{
+  const { measureSeat } = clientModule.__internal
+  assert.equal(typeof measureSeat, 'function', '模块应暴露 measureSeat 供测试调用')
+
+  /** 造一个假元素：给定视口内 left/width，可选 side 标记。 */
+  const fakeEl = (left, width, options = {}) => ({
+    isConnected: true,
+    parentElement: null,
+    closest: (sel) => (options.closestHit !== undefined && sel.includes(options.closestHit) ? {} : null),
+    getBoundingClientRect: () => ({ left, width, top: 600, bottom: 700, height: 100, right: left + width }),
+  })
+
+  const layer = fakeEl(0, 1200)
+  layer.getBoundingClientRect = () => ({ left: 0, width: 1200, top: 0, bottom: 800, height: 800, right: 1200 })
+
+  // 侧栏里那份：贴着窗口左边缘、很窄
+  const sidebarFlow = fakeEl(8, 220, { closestHit: 'data-sidebar-right-session' })
+  // 另一份没被 closest 标记拦住的窄节点（宿主里 `ChatGroupSeat` 也会挂
+  // `data-chat-flow`），它在文档序上排在主列**前面**
+  const nestedFlow = fakeEl(40, 300)
+  // 主对话列：居中、很宽
+  const mainFlow = fakeEl(320, 760)
+  // 输入框列：与主列同左边界
+  const composerSeat = fakeEl(320, 760)
+
+  globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible', gridTemplateColumns: '280px' })
+  globalThis.document = {
+    querySelector: (sel) => (sel === '[data-shell-overlay]' ? layer : null),
+    querySelectorAll: (sel) => {
+      // 顺序刻意如此：窄的在前，宽的主列在后。取第一个会把浮窗拖到 40。
+      if (sel === '[data-chat-flow]') return [sidebarFlow, nestedFlow, mainFlow]
+      if (sel === '[data-composer-seat]') return [composerSeat]
+      return []
+    },
+    body: null,
+  }
+
+  const seat = measureSeat()
+  assert.equal(
+    seat.left,
+    320,
+    `必须对齐最宽的主对话列（320），不能是侧栏那份（8）、也不能是排在前面的窄节点（40），实际 ${seat.left}。` +
+      '出现 8 或 40 就说明又回到了「拿第一个匹配」的老写法。',
+  )
+  // bottom 由输入框顶边换算：layerBox.bottom(800) - seat.top(600) + 16 = 216
+  assert.equal(seat.bottom, 216, `底边应贴合输入框上方，实际 ${seat.bottom}`)
+
+  // 只剩侧栏那份时：它属于排除对象，应当**继续往下**走兜底，
+  // 而不是勉强拿它算位置（拿它算就会贴到窗口最左边）。
+  globalThis.document.querySelectorAll = (sel) => {
+    if (sel === '[data-chat-flow]') return [sidebarFlow]
+    if (sel === '[data-composer-seat]') return []
+    return []
+  }
+  const onlySidebar = measureSeat()
+  assert.equal(onlySidebar.left, 304, `侧栏那份必须被排除并回落兜底 304，实际 ${onlySidebar.left}`)
+
+  // 什么都找不到时同样走兜底：侧边栏宽度 + 24
+  globalThis.document.querySelectorAll = () => []
+  const nothing = measureSeat()
+  assert.equal(nothing.left, 304, `全都找不到时应回落到 280+24=304，实际 ${nothing.left}`)
+}
+
+// ---- 停留 N 秒后消散（不再靠「出文字就撤」）------------------------------
+{
+  const linger = 90
+  // 已经过去 10 分钟，任务也结束了 → 该散
+  const gone = await mountOverlay({
+    enabled: true,
+    lingerSeconds: linger,
+    records: [rec({ at: Date.now() - 10 * 60 * 1000 })],
+    runningMap: { 'sess-1': false },
+  })
+  assert.equal(gone.tree, null, '任务已结束且超过停留时长后应自动消散')
+
+  // 同样很久，但任务还在跑 → 继续挂着（用户随时切回窗口都该看到）
+  const stillRunning = await mountOverlay({
+    enabled: true,
+    lingerSeconds: linger,
+    records: [rec({ at: Date.now() - 10 * 60 * 1000 })],
+    runningMap: { 'sess-1': true },
+  })
+  assert.ok(stillRunning.tree, '任务仍在运行时，即使汇报已久也应继续显示')
+
+  // 刚汇报完、任务已结束、但还在停留期内 → 仍显示
+  const lingerWindow = await mountOverlay({
+    enabled: true,
+    lingerSeconds: linger,
+    records: [rec({ at: Date.now() - 5 * 1000 })],
+    runningMap: { 'sess-1': false },
+  })
+  assert.ok(lingerWindow.tree, '停留期内不该消散')
+}
+
+// ---- 右上角关闭 -----------------------------------------------------------
+{
+  const withClose = await mountOverlay({ enabled: true, records: [rec()], runningMap: { 'sess-1': true } })
+  const btn = withClose.nodes.find((n) => n.type === 'button' && n.props?.className === 'narr-overlay-close')
+  assert.ok(btn, '浮层右上角必须有可点的关闭按钮')
+  assert.equal(btn.props['aria-label'], '关闭进度提示', '关闭按钮要有可访问名称')
+  assert.equal(typeof btn.props.onClick, 'function', '关闭按钮要绑事件')
+}
+
+// ---- 只显示当前会话：别的会话有汇报也不应冒出来 -------------------------
+{
+  const other = await mountOverlay({
+    enabled: true,
+    records: [rec({ session: 'someone-else', text: '别的会话的汇报' })],
+    runningMap: { 'someone-else': true },
+  })
+  assert.equal(other.tree, null, '别的会话在长思考，当前会话不应显示它的汇报')
+
+  const both = await mountOverlay(
+    {
+      enabled: true,
+      records: [rec({ session: 'sess-1', text: '本会话的汇报' }), rec({ session: 'sess-2', text: '别的会话的汇报' })],
+      runningMap: { 'sess-1': true, 'sess-2': true },
+    },
+    'sess-2',
+  )
+  assert.ok(both.tree, '当前看 sess-2 时应显示 sess-2 的汇报')
+  assert.ok(both.text.includes('别的会话的汇报'), '应显示当前会话的原文')
+  assert.ok(!both.text.includes('本会话的汇报'), '不得把别的会话的汇报显示出来')
+}
+
+// ---- 开关 -----------------------------------------------------------------
+{
+  const off = await mountOverlay({ enabled: false, records: [rec()] })
+  assert.equal(off.tree, null, '插件关闭时浮层不应出现')
+
+  const overlayOff = await mountOverlay({ enabled: true, overlayEnabled: false, records: [rec()] })
+  assert.equal(overlayOff.tree, null, 'overlayEnabled=false 时浮层不应出现，哪怕总开关是开的')
+}
+
+// ---- 等待态：到期立刻亮卡，且保留上一段汇报的原文 -------------------------
+// 主窗口调子代理时，这个 step 可能挂好几分钟。等它结束再亮卡，用户早就
+// 以为卡死了。所以到期那一刻（还没注入、模型还没开口）就该有卡片。
+{
+  // 第一次亮卡：还没汇报过，没有原文，只有"在等什么"
+  const waiting = await mountOverlay({
+    enabled: true,
+    records: [rec({ text: '', pending: true, phase: 'working', waiting: '正在等子任务返回', waitingTool: 'subagent' })],
+    runningMap: { 'sess-1': true },
+    waitingMap: { 'sess-1': { label: '正在等子任务返回', tool: 'subagent', startedAt: Date.now() - 42 * 1000 } },
+  })
+  assert.ok(waiting.tree, '到期就该有卡片，不能等 step 边界')
+  assert.ok(waiting.text.includes('还在等'), `标题应说明还在等，实际：${waiting.text}`)
+  assert.ok(waiting.text.includes('正在等子任务返回'), '应说清在等什么')
+  assert.ok(waiting.text.includes('已经等了 42 秒'), `应报已等秒数，实际：${waiting.text}`)
+
+  // 已经汇报过一轮，又到期了：原文必须还在，不能变成空白卡
+  const keepText = await mountOverlay({
+    enabled: true,
+    records: [
+      rec({
+        text: '我把三个候选插件的 README 读完了，正在核对它们各自挂的钩子。',
+        pending: true,
+        phase: 'working',
+        waiting: '正在等子任务返回',
+        waitingTool: 'subagent',
+      }),
+    ],
+    runningMap: { 'sess-1': true },
+    waitingMap: { 'sess-1': { label: '正在等子任务返回', tool: 'subagent', startedAt: Date.now() - 10 * 1000 } },
+  })
+  assert.ok(keepText.tree, '第二次到期也要有卡片')
+  assert.ok(
+    keepText.text.includes('我把三个候选插件的 README 读完了'),
+    `上一段汇报的原文必须保留，实际：${keepText.text}`,
+  )
+  assert.ok(keepText.text.includes('正在等子任务返回'), '同时要说清这次在等什么')
+  assert.ok(keepText.text.includes('还在等'), '标题应说明还在等')
+
+  // 已经在等模型憋汇报（phase=reporting）：说"正在整理汇报"，不是"还在等"
+  const reporting = await mountOverlay({
+    enabled: true,
+    records: [rec({ text: '', pending: true, phase: 'reporting' })],
+    runningMap: { 'sess-1': true },
+  })
+  assert.ok(reporting.tree, '等模型开口时卡片要继续挂着')
+  assert.ok(reporting.text.includes('正在整理汇报'), `实际：${reporting.text}`)
+  assert.ok(!reporting.text.includes('还在等'), '不能把"正在整理汇报"说成"还在等"')
+
+  // 等待态不会被停留时长吃掉：它描述的是"此刻"，不是一次已经说完的汇报
+  const longWaiting = await mountOverlay({
+    enabled: true,
+    lingerSeconds: 90,
+    records: [rec({ text: '', pending: true, phase: 'working', at: Date.now() - 10 * 60 * 1000 })],
+    runningMap: { 'sess-1': false },
+  })
+  assert.ok(longWaiting.tree, 'pending 的卡不按停留时长消散')
+}
+
+console.log('client-render probe: 全部通过')

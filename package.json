@@ -1,0 +1,44 @@
+{
+  "name": "dsh-narrator",
+  "version": "0.12.1",
+  "description": "长思考进度旁白插件：模型长时间只思考不出声时，注入一段提示词让它自己用正文说清进展（不结束当前任务），并把这段原文显示在对话区左下角浮窗；附带以分钟为单位的图形设置卡。(Progress narrator for DeepSeek Harness: inject a reminder so the model narrates its own progress when silent too long, without ending the turn; mirrors that text in a lower-left overlay; ships a minutes-based settings card.)",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {},
+  "peerDependencies": {},
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "progress",
+    "narrator",
+    "long-thinking"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "test": "node --test test/apply.test.js test/client-render.test.mjs test/latest-cap.test.mjs test/pure.test.js test/route-origin.test.mjs test/route.test.mjs test/switch.test.mjs"
+  },
+  "license": "MIT"
+}
