@@ -18,6 +18,14 @@
   "engines": {
     "node": ">=18.0.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Asza-other/dsh-narrator.git"
+  },
+  "homepage": "https://github.com/Asza-other/dsh-narrator#readme",
+  "bugs": {
+    "url": "https://github.com/Asza-other/dsh-narrator/issues"
+  },
   "dependencies": {},
   "peerDependencies": {},
   "keywords": [
