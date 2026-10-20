@@ -36,8 +36,8 @@ progress-monitor
 
 ## 4. 首次发布 Release
 
-**Tag**：`v0.12.1`
-**Title**：`v0.12.1 — 让模型自己汇报进度`
+**Tag**：`v0.12.2`
+**Title**：`v0.12.2 — 让模型自己汇报进度，底栏不再透字`
 
 **Release notes**：
 
@@ -80,6 +80,14 @@ document.querySelector('[data-chat-flow]')   // ← 有坑
 现在按宿主自己 `mainChatRoot()` 的做法筛选：**枚举全部候选 → 排掉侧栏 / 步骤面板内的 / 不可见的 → 取宽度最大的**。主对话列一定是同屏最宽的那块。`ResizeObserver` 同样改成观察全部候选，否则拖侧边栏时浮窗不跟手。
 
 顺带把文档里 14 处「右下角」全部改成「对话区左下角」——位置一直是对的，写错了的是描述。
+
+### 修掉的底栏透字
+
+保存按钮栏用 `position: sticky; bottom: 0` 固定在卡片下沿，但滚到底时它会被自己的包含块拽住，下沿对不上滚动视口下沿。同时宿主设置面板的滚动容器 `.wCInkW_options` 在滚动区里留了 **24px** 的 `padding-bottom`，那 24px 属于滚动区——于是按钮条下面必然空出一条带子，滚过去的提示词文字就从按钮底下露出来。
+
+给底栏加一条向下偏移的实心 `box-shadow: 0 40px 0 0` 把那截涂成底色。试过 `::after` 绝对定位，它会把 `scrollHeight` 撑大 12px，滚到底凭空多出一截空白，所以弃用。阴影不参与布局、不拦截点击，超出的部分由宿主的 `overflow: hidden` 裁掉。浅色与深色主题走同一个 `--dsw-alias-bg-layer-1`，不需要额外分支。
+
+这条改动有回归测试兜底：断言底栏必须有向下 ≥24px、无模糊、无扩散的实心阴影，且不许出现 `.narr-foot::after`。删掉 `box-shadow`、把 40px 改成 8px、或改回伪元素方案，测试都会失败。
 
 ### 装法
 
@@ -124,4 +132,7 @@ grep -rn "C:/Users\|C:\\\\Users\|/Users/ryn05" --include="*.js" --include="*.md"
 ## 6. 已知的两个发布注意事项
 
 1. **`test/` 里的 `check-status.mjs`、`step-durations.mjs`、`recent-steps.mjs` 需要参数才能跑**（端口 / 会话存档路径）。它们是取证工具，不是自动化测试，`npm test` 不包含它们。
-2. **`notes/legacy/` 是 v0.10 及以前那套机制的取证脚本**，对现在的版本无效，留作历史参考。如果不想公开，删掉这个目录即可，不影响任何功能。
+
+## 7. 这个版本删掉了什么
+
+`notes/legacy/` 下 6 个脚本（`audit-archive.mjs`、`diag-cards.mjs`、`find-narration.mjs`、`probe-reset.mjs`、`render-real-report.mjs`、`rm-choiceselect.mjs`）是 v0.10 及以前那套机制的取证工具，对现在的版本全部失效，其中 `rm-choiceselect.mjs` 更是一次性删除脚本（对着一份早已没有 `ChoiceSelect` 的代码已无意义）。公开发布前删掉，历史仍留在 git 里。

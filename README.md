@@ -90,7 +90,7 @@ cp -r dsh-narrator ~/.dsh/profiles/desktop/node_modules/dsh-narrator
 
 ```bash
 curl http://127.0.0.1:<端口>/api/narrator/status
-# {"ok":true,"version":"0.12.0",...}
+# {"ok":true,"version":"0.12.2",...}
 ```
 
 端口看 DSH 窗口地址栏。这个路由只在 `127.0.0.1` 上响应，外部访问不到。
@@ -111,7 +111,7 @@ curl http://127.0.0.1:<端口>/api/narrator/status
 | 浮窗透明度 | 1 | 0.35~1，只影响浮窗底色 |
 | 浮窗停留多久后自动消失 | 90 秒 | 5 秒~10 分钟 |
 
-保存和「恢复默认」固定在卡片下沿（`position: sticky`），滚到哪里都点得到。
+保存和「恢复默认」固定在卡片下沿（`position: sticky`），滚到哪里都点得到。底栏还向下多涂了一截底色：宿主的滚动容器自己在滚动区里留了 24px 内边距，光靠 `bottom: 0` 盖不住那一段，滚过去的文字会从按钮底下露出来。
 
 底部的「测试」区块可以把阈值临时压到几秒，方便当场看效果；关掉后恢复真实配置，**真实配置一个字节都没被改过**。
 
@@ -214,7 +214,7 @@ GET /api/narrator/status
 ```json
 {
   "ok": true,
-  "version": "0.12.0",
+  "version": "0.12.2",
   "config": { "silentSeconds": 60, "cooldownSeconds": 60, "lingerSeconds": 90 },
   "stats": {
     "startFrames": 41, "chunkFrames": 22793, "endFrames": 41,

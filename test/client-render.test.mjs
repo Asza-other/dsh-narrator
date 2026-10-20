@@ -223,6 +223,33 @@ assert.ok(
   'sticky 栏必须有底色，否则内容会从按钮缝里透出来',
 )
 
+// 光有底色还不够：滚到底时 sticky 被包含块拽住，下沿对不上视口下沿，而宿主
+// 滚动容器自己的 24px padding-bottom 属于滚动区，滚过去的文字照样从按钮底下
+// 穿出来。所以底栏必须再向下溢出一截实心背景把那段盖住。
+// 用 box-shadow 而不是 ::after：绝对定位会撑大 scrollHeight，滚到底多出空白。
+const footRules = [...styleNode.props.children.matchAll(/\.narr-foot\s*\{([^}]*)\}/g)].map((m) => m[1])
+assert.ok(footRules.length > 0, '应有 .narr-foot 规则')
+const shadowDecl = footRules.map((d) => d.match(/box-shadow:\s*([^;]+)/)).find(Boolean)
+assert.ok(shadowDecl, 'sticky 栏必须向下外溢实心底色盖住宿主滚动容器的下内边距，否则内容会从按钮下方透出来')
+// box-shadow: <offset-x> <offset-y> <blur> <spread> <color>
+const shadowValue = shadowDecl[1].trim()
+const parts = shadowValue.match(
+  /^(-?\d*\.?\d+)(?:px)?\s+(-?\d*\.?\d+)(?:px)?\s+(-?\d*\.?\d+)(?:px)?(?:\s+(-?\d*\.?\d+)(?:px)?)?/,
+)
+assert.ok(parts, `外溢阴影要写成「0 Npx 0 0 <色>」的形状，实际是「${shadowValue}」`)
+const [, offX, offY, blur, spread] = parts
+assert.equal(Number(offX), 0, '外溢阴影只向下，不能左右偏')
+assert.equal(Number(blur), 0, '外溢阴影必须是实心色块，不能有模糊（模糊会露出底下文字）')
+assert.equal(spread === undefined ? 0 : Number(spread), 0, '外溢阴影不需要扩散半径')
+assert.ok(
+  Number(offY) >= 24,
+  `向下偏移要够盖住宿主滚动容器的 24px padding-bottom，实际只有 ${offY}px`,
+)
+assert.ok(
+  !/\.narr-foot::(?:after|before)/.test(styleNode.props.children),
+  '不要用伪元素方案盖那条缝：绝对定位会撑大 scrollHeight，滚到底多出一截空白',
+)
+
 assert.ok(text.includes('分钟'), '界面文案必须出现「分钟」')
 assert.ok(text.includes('多久没有文字输出就让它说一句'), '应有静默时长项')
 assert.ok(text.includes('两次汇报至少间隔'), '应有间隔项')
