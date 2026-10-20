@@ -208,6 +208,26 @@ const styleNode = nodes.find((n) => n.type === 'style')
 assert.ok(styleNode, '应渲染样式')
 assert.ok(styleNode.props.children.includes('.narr-root'), '样式应包含根类')
 
+// 根容器底部不能留内边距。
+//
+// sticky 的行程受包含块 padding box 限制：滚到底时底栏最多贴到内容盒底边。
+// 根节点若留了 padding-bottom，底栏就比「贴住视口下沿」时高出那几像素，
+// 用户滚到最下面那一下会看到保存按钮自己往上跳。
+// 这里锁死 padding-bottom 为 0，并留出顶部/左右的内边距不动。
+{
+  const rootRules = [...styleNode.props.children.matchAll(/\.narr-root\s*\{([^}]*)\}/g)].map((m) => m[1])
+  assert.equal(rootRules.length, 1, '应只有一条 .narr-root 规则')
+  const padding = rootRules[0].match(/padding:\s*([^;]+)/)
+  assert.ok(padding, '.narr-root 应显式声明 padding')
+  const parts = padding[1].trim().split(/\s+/)
+  assert.equal(parts.length, 3, `padding 应写成「上 左右 下」三值形式，实际「${padding[1].trim()}」`)
+  assert.equal(
+    parts[2],
+    '0',
+    `根节点底部内边距必须为 0，否则滚到底时底栏会上跳 ${parts[2]}；实际「${padding[1].trim()}」`,
+  )
+}
+
 // 保存/恢复默认固定在卡片下沿：设置项一多，滚到底改完再滚回去找按钮太折腾。
 // 用 sticky 而不是给宿主的滚动容器写死定位——不用知道容器是谁。
 assert.ok(
