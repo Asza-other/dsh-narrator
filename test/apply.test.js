@@ -635,6 +635,69 @@ test('已要求汇报但模型还在憋话时，再到期不会把状态降回"�
   await ctx.dispose()
 })
 
+test('模型被要求汇报后连调几个工具，相位不能在"整理汇报"与"还在等"之间来回翻', async () => {
+  const ctx = makeCtx()
+  const agent = makeAgent()
+  apply(ctx, { silentSeconds: 0.05, cooldownSeconds: 0, maxPerTurn: 0, overlayEnabled: true })
+
+  fireStart(ctx, agent, { turn: 1, step: 1 })
+  await sleep(120)
+  await ctx.preStep({ agent, turn: 1, step: 2 })
+  assert.equal(ctx.records()[0].phase, 'reporting', '注入后应推进到 reporting')
+
+  // 模型收到「请汇报」之后先把手上的活干完：每调一次工具就收一次口，
+  // 而这时缓冲区还是空的。早先这里会把 phase 退回 working，冷却到点
+  // `tick()` 又推回 reporting，标题就在两个状态间反复横跳。
+  for (let i = 0; i < 5; i += 1) {
+    fireToolCall(ctx, agent)
+    await sleep(80)
+    assert.equal(
+      ctx.records()[0].phase,
+      'reporting',
+      `第 ${i + 1} 次工具调用后相位不该退回 working——标题会来回翻`,
+    )
+  }
+
+  // 模型终于开口，汇报原文进浮窗。收口写的是另一条记录：等待态的三个字段
+  // （pending / phase / injectedAt）都该消失——卡片从"在等"翻成"正在汇报"，
+  // 正文换成模型的原话。留着 pending 会让它永远停在等待态标题上。
+  fireText(ctx, agent, '我把三个仓库都拉下来对比了一遍。')
+  fireEnd(ctx, agent)
+  await sleep(80)
+  const done = ctx.records()[0]
+  assert.ok(done.text.includes('三个仓库'), '汇报原文应进浮窗')
+  assert.equal(done.pending, undefined, '汇报到手后不再是等待态')
+  assert.equal(done.phase, undefined, '汇报到手后相位字段应清掉')
+
+  await ctx.dispose()
+})
+
+test('截取窗口超时后，卡片才退回"还在等"', async () => {
+  const ctx = makeCtx()
+  const agent = makeAgent()
+  apply(ctx, { silentSeconds: 0.05, cooldownSeconds: 0, maxPerTurn: 0, overlayEnabled: true })
+
+  fireStart(ctx, agent, { turn: 1, step: 1 })
+  await sleep(120)
+  await ctx.preStep({ agent, turn: 1, step: 2 })
+  assert.equal(ctx.records()[0].phase, 'reporting')
+
+  // 把窗口的起始时刻挪到 CAPTURE_MAX_MS 之前，模拟"注入后十分钟都没开口"
+  // ——模型跑偏、任务被取消、工具卡死，都属于这一档。
+  const cap = ctx.narratorCaptures().get('session-1')
+  assert.ok(cap !== undefined, '注入后应存在截取窗口')
+  cap.at = Date.now() - 11 * 60 * 1000
+
+  fireToolCall(ctx, agent)
+  await sleep(80)
+
+  const rec = ctx.records()[0]
+  assert.equal(rec.phase, 'working', '窗口超时才允许退回还在等')
+  assert.equal(rec.injectedAt, undefined, 'injectedAt 必须一起清，否则 tick 又会推回 reporting')
+
+  await ctx.dispose()
+})
+
 test('等待态会带上"在等什么"，主窗口等子任务时说得清', async () => {
   const ctx = makeCtx()
   const agent = makeAgent()
