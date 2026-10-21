@@ -721,7 +721,7 @@ assert.ok(!shown.text.includes('正在做：'), '不应再出现插件拼接的�
     textAtMap: { [session]: now - 60_000 },
   })
   assert.ok(waitingSubagent.tree, '等子代理期间没有主窗口正文，浮窗应继续显示')
-  assert.ok(waitingSubagent.text.includes('还在等'), `实际：${waitingSubagent.text}`)
+  assert.ok(waitingSubagent.text.includes('等这一步跑完再汇总'), `实际：${waitingSubagent.text}`)
 }
 
 // ---- 叉掉后切走再切回，同一条汇报不再出现 -------------------------------
@@ -801,7 +801,7 @@ assert.ok(!shown.text.includes('正在做：'), '不应再出现插件拼接的�
     waitingMap: { 'sess-1': { label: '正在等子任务返回', tool: 'subagent', startedAt: Date.now() - 42 * 1000 } },
   })
   assert.ok(waiting.tree, '到期就该有卡片，不能等 step 边界')
-  assert.ok(waiting.text.includes('还在等'), `标题应说明还在等，实际：${waiting.text}`)
+  assert.ok(waiting.text.includes('等这一步跑完再汇总'), `标题应说明在等工具返回，实际：${waiting.text}`)
   assert.ok(waiting.text.includes('正在等子任务返回'), '应说清在等什么')
   assert.ok(waiting.text.includes('已经等了 42 秒'), `应报已等秒数，实际：${waiting.text}`)
 
@@ -826,9 +826,9 @@ assert.ok(!shown.text.includes('正在做：'), '不应再出现插件拼接的�
     `上一段汇报的原文必须保留，实际：${keepText.text}`,
   )
   assert.ok(keepText.text.includes('正在等子任务返回'), '同时要说清这次在等什么')
-  assert.ok(keepText.text.includes('还在等'), '标题应说明还在等')
+  assert.ok(keepText.text.includes('等这一步跑完再汇总'), '标题应说明在等工具返回')
 
-  // 已经在等模型憋汇报（phase=reporting）：说"正在整理汇报"，不是"还在等"
+  // 已经在等模型憋汇报（phase=reporting）：说"正在整理汇报"，不是等待态标题
   const reporting = await mountOverlay({
     enabled: true,
     records: [rec({ text: '', pending: true, phase: 'reporting' })],
@@ -836,7 +836,7 @@ assert.ok(!shown.text.includes('正在做：'), '不应再出现插件拼接的�
   })
   assert.ok(reporting.tree, '等模型开口时卡片要继续挂着')
   assert.ok(reporting.text.includes('正在整理汇报'), `实际：${reporting.text}`)
-  assert.ok(!reporting.text.includes('还在等'), '不能把"正在整理汇报"说成"还在等"')
+  assert.ok(!reporting.text.includes('等这一步'), '不能把"正在整理汇报"说成等待态')
 
   // 等待态不会被停留时长吃掉：它描述的是"此刻"，不是一次已经说完的汇报
   const longWaiting = await mountOverlay({
