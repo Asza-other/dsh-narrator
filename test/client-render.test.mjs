@@ -804,6 +804,16 @@ assert.ok(!shown.text.includes('正在做：'), '不应再出现插件拼接的�
   assert.ok(waiting.text.includes('等这一步跑完再汇总'), `标题应说明在等工具返回，实际：${waiting.text}`)
   assert.ok(waiting.text.includes('正在等子任务返回'), '应说清在等什么')
   assert.ok(waiting.text.includes('已经等了 42 秒'), `应报已等秒数，实际：${waiting.text}`)
+  // 标题已经说了「等这一步跑完再汇总」，正文再补一句「等它返回后，这一步才会
+  // 汇总」是同一句话说两遍，白占一行高度。用户明确要求去掉。
+  assert.ok(
+    !waiting.text.includes('才会汇总'),
+    `正文不该重复标题已经说过的话，实际：${waiting.text}`,
+  )
+  assert.ok(
+    !waiting.text.includes('等它返回后'),
+    `正文不该重复标题已经说过的话，实际：${waiting.text}`,
+  )
 
   // 已经汇报过一轮，又到期了：原文必须还在，不能变成空白卡
   const keepText = await mountOverlay({
