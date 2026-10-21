@@ -130,13 +130,20 @@ const collect = (node, out = []) => {
   return out
 }
 
-/** 取整棵树的纯文本（用于文案断言）。 */
+/**
+ * 取整棵树的纯文本（用于文案断言）。
+ *
+ * 子节点之间**不加分隔符**，按原样拼接——这就是浏览器渲染文本的方式。
+ * 早期这里写的是 `.join(' ')`，看上去只是「拼得更松」，实际会造出原文里
+ * 不存在的空格：`['a ', '*', ' b']` 渲染出来是 `a * b`，join(' ') 却拼成
+ * `a  *  b`，让人误判星号被吃掉了一个。
+ */
 const textOf = (node) => {
   if (node === null || node === undefined) return ''
   if (typeof node === 'string' || typeof node === 'number') return String(node)
   if (typeof node !== 'object') return ''
   const kids = node.props?.children
-  if (Array.isArray(kids)) return kids.map(textOf).join(' ')
+  if (Array.isArray(kids)) return kids.map(textOf).join('')
   return textOf(kids)
 }
 
@@ -981,7 +988,97 @@ assert.ok(!shown.text.includes('正在做：'), '不应再出现插件拼接的�
     `乘法的星号一个都不能少，实际：${multiply.text}`,
   )
 
-  // 下划线不认：正文里到处是 snake_case，认得话会把标识符劈开
+  // ---- 反引号成对计数 ----------------------------------------------------
+  //
+  // 想在正文里展示「代码里带反引号」的写法，人写的是 `` `x` ``（外层两个反引号）。
+  // 逐字符配对的实现会拿第一个反引号去和第二个配，得到一个空代码块，真正的 x 漏成
+  // 普通文字。开几个就必须闭几个。
+  const nested = await mountOverlay({
+    enabled: true,
+    records: [rec({ text: '写法是 `` `x` `` 这样，还有 **粗** 和 *斜*' })],
+    runningMap: { 'sess-1': true },
+  })
+  const codeBodies = nested.nodes.filter((n) => n.type === 'code').map(textOf)
+  assert.deepStrictEqual(
+    codeBodies,
+    ['`x`'],
+    `双反引号里包着单个反引号时，该整体是一个代码节点，实际：${JSON.stringify(codeBodies)}`,
+  )
+  assert.ok(
+    !codeBodies.includes(''),
+    '反引号配对不能配出空代码块',
+  )
+  assert.ok(
+    nested.nodes.map((n) => n.type).includes('strong'),
+    '双反引号后面的 **粗** 不能受影响',
+  )
+  assert.ok(
+    nested.nodes.map((n) => n.type).includes('em'),
+    '双反引号后面的 *斜* 不能受影响',
+  )
+
+  // 落单的反引号原样显示，不能吞掉后面的整段文字
+  const strayTick = await mountOverlay({
+    enabled: true,
+    records: [rec({ text: '这里有个落单的反引号 ` 后面还有字' })],
+    runningMap: { 'sess-1': true },
+  })
+  assert.ok(
+    strayTick.text.includes('后面还有字'),
+    `落单的反引号后面必须原样输出，实际：${strayTick.text}`,
+  )
+
+  // ---- 斜体两侧空白：两条判据各自单独生效 --------------------------------
+  //
+  // 这两条是冗余的防线，随便删一条，另一条通常还能兜住，所以要么就用「只有一条
+  // 能兜住」的输入来测，否则变异测试看不出区别。
+  //
+  // ① 只测开头：`1 * 2 和 3* 4` 里第一个星号后面是空格（开头判据拦），但它
+  //    到下一个星号之间是「2 和 3」，结尾不是空白（结尾判据兜不住）。
+  const openSide = await mountOverlay({
+    enabled: true,
+    records: [rec({ text: '1 * 2 和 3* 4' })],
+    runningMap: { 'sess-1': true },
+  })
+  assert.ok(
+    !openSide.nodes.map((n) => n.type).includes('em'),
+    `星号后面紧跟空格是乘法，不能起斜体，实际：${openSide.text}`,
+  )
+  assert.ok(openSide.text.includes('1 * 2 和 3* 4'), `原文一个字都不能少，实际：${openSide.text}`)
+
+  // ② 只测结尾：`*abc *` 开头是字母（开头判据放行），但收尾在空格上，只能靠
+  //    结尾判据拦住。
+  const closeSide = await mountOverlay({
+    enabled: true,
+    records: [rec({ text: '写成 *abc * 这样' })],
+    runningMap: { 'sess-1': true },
+  })
+  assert.ok(
+    !closeSide.nodes.map((n) => n.type).includes('em'),
+    `星号紧贴空格收尾是乘法，不能算斜体，实际：${closeSide.text}`,
+  )
+  assert.ok(closeSide.text.includes('*abc *'), `原文一个字都不能少，实际：${closeSide.text}`)
+
+  // ---- 粗体中间不许夹星号 ------------------------------------------------
+  //
+  // `**a*b**` 里那对双星号如果一路配到底，会把 `a*b` 整个吞进 strong。宁可
+  // 退回纯文本——粗体没认出来只是少了个视觉强调，吞掉星号是丢内容。
+  const boldWithStar = await mountOverlay({
+    enabled: true,
+    records: [rec({ text: '写成 **a*b** 这样' })],
+    runningMap: { 'sess-1': true },
+  })
+  const swallowed = boldWithStar.nodes.filter((n) => n.type === 'strong').map(textOf).join('|')
+  assert.ok(
+    !swallowed.includes('a*b'),
+    `粗体不能把中间的星号一起吞掉，实际 strong 内容：${swallowed || '(无)'}`,
+  )
+  assert.ok(
+    boldWithStar.text.includes('**a*b**') || boldWithStar.text.includes('*ab**'),
+    `星号至少要原样留在正文里，实际：${boldWithStar.text}`,
+  )
+
+  // ---- 下划线不认 --------------------------------------------------------
   const underscores = await mountOverlay({
     enabled: true,
     records: [rec({ text: '改的是 `dsh_plugin_research` 下那几个文件' })],
