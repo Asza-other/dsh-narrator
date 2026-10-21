@@ -154,6 +154,103 @@ test('总开关优先：enabled=false 时既不注入也不截取', async () => 
   assert.ok(status.stats.skipped.disabled >= 1)
 })
 
+// 汇报原文本身不能算「模型又开口了」。
+//
+// 用户原话：「弹窗在有文字输出后消失不包括总结，弹窗应该在总结输出后显示
+// 总结内容，等待非总结的文字输出再消失」。
+//
+// 前端撤卡判据是「实时 textAtMap[会话] > 记录里冻结的 textAt」。汇报原文
+// 也是一串 text-delta，如果它也推进 lastTextAt，浮窗会在模型**正写着总结**
+// 的时候被它自己撤掉——表现为第一段总结刚出字就消失。
+test('汇报原文不推进撤卡时钟，浮窗留得住', async () => {
+  const sessionId = 'chan-summary-keeps'
+  const ctx = makeCtx()
+  apply(ctx, { silentSeconds: 0.1, cooldownSeconds: 0, overlayEnabled: true })
+  const agent = makeAgent(sessionId)
+
+  await ctx.emit('agent/assistant-stream', {
+    agent,
+    frame: { type: 'start', attemptId: 'a1', turn: 1, step: 1 },
+  })
+  await sleep(220)
+
+  const decision = await ctx.preStep({ agent, turn: 1, step: 2 })
+  assert.equal(decision.messages.length, 1, '前置：这一步应有注入')
+
+  // 模型把汇报写成一个字一个字的流——真实事件就是这样分片的
+  await ctx.emit('agent/assistant-stream', {
+    agent,
+    frame: { type: 'start', attemptId: 'a2', turn: 1, step: 2 },
+  })
+
+  // **必须中途采样。** 撤卡判定发生在浏览器每次轮询时，也就是汇报还在流式
+  // 输出、`commitCapture` 还没执行的这段时间。等 `end` 帧之后再比是测不出
+  // 问题的：那时 `commitCapture` 已经把时钟当前值冻结进 `textAt`，两边天然
+  // 相等，无论有没有 bug 都通过。
+  //
+  // 这里要 `sleep` 拉开时间差：整条链路都是同步的，同毫秒内完成的话
+  // `T2 - T1 === 0`，变异体也能蒙混过关。真实场景里汇报是隔几百毫秒才
+  // 出字，20ms 已足以复现那个「时钟超前」的条件。
+  await sleep(20)
+  await ctx.emit('agent/assistant-stream', {
+    agent,
+    frame: { type: 'chunk', chunk: { type: 'text-delta', text: '正在跑测试，' } },
+  })
+
+  const midRecords = ctx.records()
+  assert.equal(midRecords.length, 1, '前置：流式期间应已有浮窗记录')
+  const midClock = typeof ctx.narratorTextAt === 'function' ? ctx.narratorTextAt() : {}
+  const midClockAt = midClock[sessionId]
+  assert.ok(
+    midClockAt === undefined || midClockAt <= midRecords[0].textAt,
+    `汇报原文推进了撤卡时钟（clock=${midClockAt} > textAt=${midRecords[0].textAt}），浮窗会在正写总结时消失`,
+  )
+
+  await ctx.emit('agent/assistant-stream', {
+    agent,
+    frame: { type: 'chunk', chunk: { type: 'text-delta', text: '还有三步。' } },
+  })
+  await ctx.emit('agent/assistant-stream', { agent, frame: { type: 'end', attemptId: 'a2', index: 0 } })
+
+  const records = ctx.records()
+  assert.equal(records.length, 1, '应留下一条汇报记录')
+  assert.match(records[0].text, /正在跑测试/)
+
+  // 收口之后同样要比：此时 textAt 已冻结，若时钟仍超前说明收口取错了基准。
+  const clock = typeof ctx.narratorTextAt === 'function' ? ctx.narratorTextAt() : {}
+  const clockAt = clock[sessionId]
+  assert.ok(
+    clockAt === undefined || clockAt <= records[0].textAt,
+    `收口后撤卡时钟仍超前（clock=${clockAt} > textAt=${records[0].textAt}）`,
+  )
+
+  await ctx.dispose()
+})
+
+// 反面：汇报之外模型自主开口，必须照常推进时钟，浮窗该走就走。
+test('汇报之外的正文照常推进撤卡时钟', async () => {
+  const sessionId = 'chan-plain-text'
+  const ctx = makeCtx()
+  apply(ctx, { silentSeconds: 0.1, cooldownSeconds: 0, overlayEnabled: true })
+  const agent = makeAgent(sessionId)
+
+  await ctx.emit('agent/assistant-stream', {
+    agent,
+    frame: { type: 'start', attemptId: 'a1', turn: 1, step: 1 },
+  })
+
+  // 没有任何截取窗口，模型自己说了句话
+  await ctx.emit('agent/assistant-stream', {
+    agent,
+    frame: { type: 'chunk', chunk: { type: 'text-delta', text: '我顺手把日志也清了一下。' } },
+  })
+
+  const clock = typeof ctx.narratorTextAt === 'function' ? ctx.narratorTextAt() : {}
+  assert.equal(typeof clock[sessionId], 'number', '截取窗口之外的正文必须推进时钟')
+
+  await ctx.dispose()
+})
+
 test('includeSubagents 为 false 时跳过子代理', async () => {
   const ctx = makeCtx()
   apply(ctx, { silentSeconds: 0.05, cooldownSeconds: 0, includeSubagents: false })
