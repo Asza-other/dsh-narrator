@@ -1212,6 +1212,53 @@ assert.ok(!shown.text.includes('正在做：'), '不应再出现插件拼接的�
     !tildeFence.nodes.map((n) => n.type).includes('strong'),
     '~~~ 块里的 ** 同样是代码',
   )
+
+  // ---- 代码块后面紧跟表格 ------------------------------------------------
+  //
+  // 这个组合踩过一次：splitFences 切开围栏后，文字段开头留着一个空行（围栏前
+  // 那个），于是 lines[0] 是空串、lines[1] 才是表头。parseTable 把空串当表头、
+  // 真表头当分割行去验，当场返回 null，表格退化成带竖线的普通文字。
+  //
+  // 上面「围栏代码块」那组测试没抓住，是因为代码块放在最后、后面只有一行正文。
+  const fenceThenTable = await mountOverlay({
+    enabled: true,
+    records: [
+      rec({
+        text: ['```js', 'const a = 1', '```', '', '| 甲 | 乙 |', '| --- | --- |', '| 单元格 | 值 |'].join('\n'),
+      }),
+    ],
+    runningMap: { 'sess-1': true },
+  })
+  assert.ok(
+    fenceThenTable.nodes.map((n) => n.type).includes('table'),
+    `代码块后面的表格必须照常认出来，实际标签：${fenceThenTable.nodes.map((n) => n.type).join(',')}`,
+  )
+  const fenceCells = fenceThenTable.nodes.filter((n) => n.type === 'td').map((n) => textOf(n).trim())
+  assert.deepStrictEqual(
+    fenceCells,
+    ['单元格', '值'],
+    `代码块后面的表格单元格不对：${JSON.stringify(fenceCells)}`,
+  )
+
+  // 反过来也要成立：表格在前、代码块在后，中间的空行同样不能捣乱
+  const tableThenFence = await mountOverlay({
+    enabled: true,
+    records: [
+      rec({
+        text: ['| 甲 | 乙 |', '| --- | --- |', '| 单元格 | 值 |', '', '```js', 'const a = 1', '```'].join('\n'),
+      }),
+    ],
+    runningMap: { 'sess-1': true },
+  })
+  assert.ok(
+    tableThenFence.nodes.map((n) => n.type).includes('table'),
+    `表格后面接代码块时表格不能被破坏，实际标签：${tableThenFence.nodes.map((n) => n.type).join(',')}`,
+  )
+  assert.strictEqual(
+    tableThenFence.nodes.filter((n) => n.type === 'pre').length,
+    1,
+    '表格后面的代码块要正常渲染',
+  )
 }
 
 console.log('client-render probe: 全部通过')
