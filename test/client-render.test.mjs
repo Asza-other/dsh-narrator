@@ -947,6 +947,102 @@ assert.ok(!shown.text.includes('正在做：'), '不应再出现插件拼接的�
     pipeInCode.nodes.some((n) => n.type === 'code' && textOf(n) === 'a|b'),
     '单元格里的反引号要渲染成行内代码',
   )
+
+  // ---- 行内标记 ----------------------------------------------------------
+  const inline = await mountOverlay({
+    enabled: true,
+    records: [rec({ text: '**粗体**、*斜体*、`code`，还有 a * b 这种乘法' })],
+    runningMap: { 'sess-1': true },
+  })
+  const inlineTags = inline.nodes.map((n) => n.type)
+  assert.ok(inlineTags.includes('strong'), `**粗体** 要渲染成 strong，实际标签：${inlineTags.join(',')}`)
+  assert.ok(inlineTags.includes('em'), `*斜体* 要渲染成 em`)
+  assert.ok(inline.nodes.some((n) => n.type === 'code' && textOf(n) === 'code'), '行内代码照旧')
+  const strongText = inline.nodes.filter((n) => n.type === 'strong').map(textOf).join('|')
+  assert.strictEqual(strongText, '粗体', `strong 只该包住粗体内容，实际：${strongText}`)
+  assert.ok(
+    inline.text.includes('a * b'),
+    `两侧空白的星号是乘法不是斜体，原文要留着，实际：${inline.text}`,
+  )
+
+  // 两个散落的星号配对最容易误伤：`1 * 2 和 3 * 4` 里的 ` 2 和 3 ` 不能被当成斜体。
+  // 只有一个星号的乘法配不成对，判据坏掉也看不出来，所以这里必须用两个。
+  const multiply = await mountOverlay({
+    enabled: true,
+    records: [rec({ text: '算了下 1 * 2 和 3 * 4 都是偶数' })],
+    runningMap: { 'sess-1': true },
+  })
+  assert.ok(
+    !multiply.nodes.map((n) => n.type).includes('em'),
+    '两侧带空格的星号是乘法，不能配成斜体',
+  )
+  assert.ok(
+    multiply.text.includes('1 * 2 和 3 * 4'),
+    `乘法的星号一个都不能少，实际：${multiply.text}`,
+  )
+
+  // 下划线不认：正文里到处是 snake_case，认得话会把标识符劈开
+  const underscores = await mountOverlay({
+    enabled: true,
+    records: [rec({ text: '改的是 `dsh_plugin_research` 下那几个文件' })],
+    runningMap: { 'sess-1': true },
+  })
+  assert.ok(
+    !underscores.nodes.map((n) => n.type).includes('em'),
+    'snake_case 里的下划线不能被当成斜体',
+  )
+  assert.ok(
+    underscores.nodes.some((n) => n.type === 'code' && textOf(n) === 'dsh_plugin_research'),
+    '下划线标识符要原样留在行内代码里',
+  )
+
+  // ---- 标题与列表 --------------------------------------------------------
+  const structured = await mountOverlay({
+    enabled: true,
+    records: [
+      rec({
+        text: [
+          '## 已完成的工作',
+          '',
+          '改了三处：',
+          '',
+          '- 浮层标题不再重复',
+          '- 底栏补底色',
+          '1. 先跑测试',
+          '2. 再同步副本',
+        ].join('\n'),
+      }),
+    ],
+    runningMap: { 'sess-1': true },
+  })
+  const structTags = structured.nodes.map((n) => n.type)
+  assert.ok(structTags.includes('h2'), `## 要渲染成 h2，实际标签：${structTags.join(',')}`)
+  assert.ok(!structured.text.includes('##'), '标题的井号不能再显示出来')
+  assert.ok(structured.text.includes('已完成的工作'), '标题文字要留着')
+  const listMarks = structured.nodes
+    .filter((n) => n.props?.className === 'narr-overlay-li-mark')
+    .map((n) => textOf(n))
+  assert.deepStrictEqual(
+    listMarks,
+    ['•', '•', '1.', '2.'],
+    `列表标记不对：${JSON.stringify(listMarks)}`,
+  )
+
+  // 标记后没空格的是正文，不是列表
+  const notList = await mountOverlay({
+    enabled: true,
+    records: [rec({ text: '-3 度到 5 度\n#不是标题' })],
+    runningMap: { 'sess-1': true },
+  })
+  assert.ok(
+    !notList.nodes.some((n) => n.props?.className === 'narr-overlay-li-mark'),
+    '`-3 度` 是正文，标记后没空格不能当列表',
+  )
+  assert.ok(
+    !notList.nodes.map((n) => n.type).includes('h1'),
+    '`#不是标题` 没有空格，不能当标题',
+  )
+  assert.ok(notList.text.includes('-3 度'), `正文一个字都不能丢，实际：${notList.text}`)
 }
 
 console.log('client-render probe: 全部通过')

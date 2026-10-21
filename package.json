@@ -1,6 +1,6 @@
 {
   "name": "dsh-narrator",
-  "version": "0.12.6",
+  "version": "0.12.5",
   "description": "长思考进度旁白插件：模型长时间只思考不出声时，注入一段提示词让它自己用正文说清进展（不结束当前任务），并把这段原文显示在对话区左下角浮窗；附带以分钟为单位的图形设置卡。(Progress narrator for DeepSeek Harness: inject a reminder so the model narrates its own progress when silent too long, without ending the turn; mirrors that text in a lower-left overlay; ships a minutes-based settings card.)",
   "type": "module",
   "main": "lib/index.js",
