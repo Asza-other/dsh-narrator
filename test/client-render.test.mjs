@@ -1140,6 +1140,78 @@ assert.ok(!shown.text.includes('正在做：'), '不应再出现插件拼接的�
     '`#不是标题` 没有空格，不能当标题',
   )
   assert.ok(notList.text.includes('-3 度'), `正文一个字都不能丢，实际：${notList.text}`)
+
+  // ---- 围栏代码块 --------------------------------------------------------
+  //
+  // 这里有过一次方向调整。早先的决定是「代码块不解析」：``` 原样留在正文里，块
+  // 里的内容也不特殊处理。真跑起来发现这么做的结果最难看——三个反引号白纸黑字
+  // 印着，而块里的 `**` 和反引号照样被当行内标记拆碎，代码片段七零八落。
+  // 现在按围栏的意思渲染：整块逐字原样显示。
+  const fenced = await mountOverlay({
+    enabled: true,
+    records: [
+      rec({
+        text: ['先跑这段：', '', '```js', 'const a = **1** // *不是斜体*', 'if (a *** 2) {}', '```', '', '跑完了。'].join(
+          '\n',
+        ),
+      }),
+    ],
+    runningMap: { 'sess-1': true },
+  })
+  const preNodes = fenced.nodes.filter((n) => n.type === 'pre')
+  assert.strictEqual(preNodes.length, 1, `围栏代码块要渲染成一个 pre，实际：${fenced.nodes.map((n) => n.type).join(',')}`)
+  assert.ok(
+    !fenced.nodes.map((n) => n.type).includes('strong'),
+    '代码块里的 ** 是代码，不能渲染成粗体',
+  )
+  assert.ok(
+    !fenced.nodes.map((n) => n.type).includes('em'),
+    '代码块里的 * 是代码，不能渲染成斜体',
+  )
+  assert.ok(
+    preNodes.some((n) => textOf(n).includes('const a = **1** // *不是斜体*')),
+    `代码块内容要逐字保留，实际：${JSON.stringify(preNodes.map(textOf))}`,
+  )
+  assert.ok(
+    !fenced.text.includes('```'),
+    `围栏符号本身不能再显示出来，实际：${fenced.text}`,
+  )
+  assert.ok(fenced.text.includes('先跑这段'), '代码块前面的正文要留着')
+  assert.ok(fenced.text.includes('跑完了'), '代码块后面的正文要留着')
+
+  // 围栏没闭合：整段退回普通文字，一个字符都不能丢。
+  // 一个 ``` 打错就把后面几百字吞进代码块的话，用户看到的是「汇报后半段不见了」。
+  const openFence = await mountOverlay({
+    enabled: true,
+    records: [rec({ text: '看这个：\n```js\nconst a = 1\n后面还有正文' })],
+    runningMap: { 'sess-1': true },
+  })
+  assert.strictEqual(
+    openFence.nodes.filter((n) => n.type === 'pre').length,
+    0,
+    '没闭合的围栏不能当代码块',
+  )
+  assert.ok(
+    openFence.text.includes('后面还有正文'),
+    `围栏没闭合时后文要照常显示，实际：${openFence.text}`,
+  )
+
+  // 波浪号围栏也是围栏（CommonMark 认 ~~~），但 `~~~` 用在正文里的情况极少，
+  // 这里只确认它不会把内容当行内标记拆。
+  const tildeFence = await mountOverlay({
+    enabled: true,
+    records: [rec({ text: '~~~\n**不是粗体**\n~~~' })],
+    runningMap: { 'sess-1': true },
+  })
+  assert.strictEqual(
+    tildeFence.nodes.filter((n) => n.type === 'pre').length,
+    1,
+    '~~~ 也是合法的围栏',
+  )
+  assert.ok(
+    !tildeFence.nodes.map((n) => n.type).includes('strong'),
+    '~~~ 块里的 ** 同样是代码',
+  )
 }
 
 console.log('client-render probe: 全部通过')
