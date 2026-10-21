@@ -705,3 +705,65 @@ test('子代理的输出不会重置主窗口的静默计时', async () => {
 
   await ctx.dispose()
 })
+
+test('模型先调工具后说话时，汇报原文照样进浮窗', async () => {
+  // 真机上的常态：注入之后模型不立刻开口，而是先把手上那个命令跑完。
+  // 早先 commitCapture 遇到空缓冲区会无条件 captures.delete，第一个
+  // tool-call-delta 就把截取窗口收了，等模型真说话时已经拿不到缓冲区——
+  // 那段汇报被当成"自主发言"，既进不了浮窗、又推进 lastTextAt 把卡撤掉。
+  // 表现为多 step 长任务里 captured 恒为 0。
+  const ctx = makeCtx()
+  const agent = makeAgent()
+  apply(ctx, { silentSeconds: 0.05, cooldownSeconds: 0, maxPerTurn: 0, overlayEnabled: true })
+
+  fireStart(ctx, agent, { turn: 1, step: 1 })
+  await sleep(120)
+  await ctx.preStep({ agent, turn: 1, step: 2 })
+
+  // 注入之后先干了两轮活，一句话没说
+  fireToolCall(ctx, agent)
+  fireStart(ctx, agent, { turn: 1, step: 3 })
+  fireToolCall(ctx, agent)
+
+  // 这时候才开口汇报
+  fireText(ctx, agent, '我扫完了 1201 个文件，')
+  fireText(ctx, agent, '发现 29 个是空文件。')
+  fireToolCall(ctx, agent)
+
+  const records = ctx.records()
+  assert.equal(records.length, 1, '应记下一条浮层记录')
+  assert.equal(
+    records[0].text,
+    '我扫完了 1201 个文件，发现 29 个是空文件。',
+    '先调工具后说话的汇报原文不能丢',
+  )
+  assert.equal(ctx.status().stats.captured, 1, 'captured 要真的加一，不能空转')
+
+  await ctx.dispose()
+})
+
+test('注入后一直不开口时，截取窗口不能永远挂着', async () => {
+  // 上一条改成"空缓冲区保留窗口"之后，必须有时间闸兜底：一个注入后彻底
+  // 沉默的会话会把缓冲区永久留在内存里。
+  const ctx = makeCtx()
+  const agent = makeAgent()
+  apply(ctx, { silentSeconds: 0.05, cooldownSeconds: 0, maxPerTurn: 0, overlayEnabled: true })
+
+  fireStart(ctx, agent, { turn: 1, step: 1 })
+  await sleep(120)
+  await ctx.preStep({ agent, turn: 1, step: 2 })
+
+  // 直接把窗口的出生时刻往前推：等价于"已经挂了很久"
+  // （真实的 CAPTURE_MAX_MS 是 10 分钟，测试里不能真等）
+  const caps = ctx.narratorCaptures()
+  assert.ok(caps !== undefined, '需要拿到截取窗口才能做这个断言')
+  const cap = caps.get('session-1')
+  assert.ok(cap !== undefined, '注入之后窗口应该存在')
+  cap.at -= 11 * 60 * 1000
+
+  fireToolCall(ctx, agent)
+  assert.equal(caps.get('session-1'), undefined, '超时之后窗口必须被丢掉')
+
+  await ctx.dispose()
+})
+
