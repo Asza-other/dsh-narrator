@@ -856,6 +856,97 @@ assert.ok(!shown.text.includes('正在做：'), '不应再出现插件拼接的�
     runningMap: { 'sess-1': false },
   })
   assert.ok(longWaiting.tree, 'pending 的卡不按停留时长消散')
+
+  // 表格：模型爱在汇报里写 GFM 表格，原样渲染的话竖线会糊在正文里
+  const tableReport = [
+    '**两条回归测试用真实事件顺序**，变异验证：',
+    '',
+    '| 变异 | 报错 |',
+    '| --- | --- |',
+    '| 把 `delete` 挪回判空之前 | 「先调工具后说话的汇报原文不能丢」 |',
+    '| 去掉时间闸 | 「超时之后窗口必须被丢掉」 |',
+  ].join('\n')
+  const withTable = await mountOverlay({
+    enabled: true,
+    records: [rec({ text: tableReport })],
+    runningMap: { 'sess-1': true },
+  })
+  const tags = withTable.nodes.map((n) => n.type)
+  assert.ok(tags.includes('table'), `表格必须渲染成真 table，实际标签：${tags.join(',')}`)
+  assert.ok(tags.includes('th') && tags.includes('td'), '表头与单元格要分别成 th / td')
+  const thTexts = withTable.nodes.filter((n) => n.type === 'th').map((n) => textOf(n).trim())
+  assert.deepStrictEqual(thTexts, ['变异', '报错'], `表头不对：${JSON.stringify(thTexts)}`)
+  const tdTexts = withTable.nodes.filter((n) => n.type === 'td').map((n) => textOf(n).trim())
+  assert.strictEqual(tdTexts.length, 4, `两行两列应有 4 个单元格，实际：${JSON.stringify(tdTexts)}`)
+  assert.ok(
+    !withTable.nodes.some((n) => n.type === 'div' && typeof n.props?.children === 'string' && n.props.children.includes('| --- |')),
+    '分割行不能被当成正文显示出来',
+  )
+  assert.ok(
+    withTable.text.includes('把') && withTable.text.includes('不能丢'),
+    '表格单元格里的文字要照常出现',
+  )
+
+  // 表头与分割行列数对不上（模型手滑写多了），不能硬认成表格把正文吃掉
+  const badTable = await mountOverlay({
+    enabled: true,
+    records: [rec({ text: '| 甲 | 乙 |\n| --- |\n后续正文' })],
+    runningMap: { 'sess-1': true },
+  })
+  assert.ok(
+    !badTable.nodes.map((n) => n.type).includes('table'),
+    '列数对不上的行不是表格，应退回纯文本',
+  )
+  assert.ok(badTable.text.includes('后续正文'), '认不出表格时正文一个字都不能丢')
+
+  // 段中间的竖线不是表格：认错会把正常句子拆成格子
+  const pipeMidText = await mountOverlay({
+    enabled: true,
+    records: [rec({ text: '先跑 a | b 再跑 c\n然后收尾' })],
+    runningMap: { 'sess-1': true },
+  })
+  assert.ok(
+    !pipeMidText.nodes.map((n) => n.type).includes('table'),
+    '没有分割行的竖线是正文，不是表格',
+  )
+  assert.ok(pipeMidText.text.includes('a | b'), `正文里的竖线要原样保留，实际：${pipeMidText.text}`)
+
+  // 第二行也带竖线，但不是分割行（没有连字符）：仍然不是表格。
+  // 只靠「两行都有竖线」判表格的话，这种正文会被硬拆成格子。
+  const notDivider = await mountOverlay({
+    enabled: true,
+    records: [rec({ text: '| 甲 | 乙 |\n这条也带竖线 | 但它不是分割行' })],
+    runningMap: { 'sess-1': true },
+  })
+  assert.ok(
+    !notDivider.nodes.map((n) => n.type).includes('table'),
+    '第二行不是分割行就不能认成表格',
+  )
+  assert.ok(
+    notDivider.text.includes('它不是分割行'),
+    `认不出表格时原文要照常显示，实际：${notDivider.text}`,
+  )
+
+  // 反引号里的竖线：模型常写 `a|b` 这种管道运算符，它不能把单元格劈开
+  const pipeInCode = await mountOverlay({
+    enabled: true,
+    records: [
+      rec({
+        text: '| 文件 | 说明 |\n| --- | --- |\n| `a|b` | 反引号里的竖线 |',
+      }),
+    ],
+    runningMap: { 'sess-1': true },
+  })
+  const codeCells = pipeInCode.nodes.filter((n) => n.type === 'td').map((n) => textOf(n).trim())
+  assert.deepStrictEqual(
+    codeCells,
+    ['a|b', '反引号里的竖线'],
+    `反引号内的竖线不应当分隔符，实际单元格：${JSON.stringify(codeCells)}`,
+  )
+  assert.ok(
+    pipeInCode.nodes.some((n) => n.type === 'code' && textOf(n) === 'a|b'),
+    '单元格里的反引号要渲染成行内代码',
+  )
 }
 
 console.log('client-render probe: 全部通过')
