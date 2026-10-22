@@ -54,6 +54,7 @@ function call(handler, { method = 'GET', body = null, remote = '127.0.0.1', url 
       method,
       url: url ?? '/',
       socket: { remoteAddress: remote },
+      headers: { 'sec-fetch-site': 'same-origin' },
       on(event, fn) {
         listeners[event] = listeners[event] ?? []
         listeners[event].push(fn)
@@ -175,6 +176,22 @@ assert.equal(afterBad.config.cooldownSeconds, 120, '非数字被拒，保留旧�
   const neg = await call(getHandler, { method: 'POST', body: { config: { maxPerTurn: -1 } } })
   assert.equal(neg.status, 400, '负数应被拒')
   assert.equal(JSON.parse((await call(getHandler)).body).config.maxPerTurn, 5, '被拒时保留旧值')
+}
+
+// 10) 超长 prompt 在写入侧被拒（审计 P1：prompt 无上限）
+{
+  const before = JSON.parse((await call(getHandler)).body).config.prompt
+  const tooLong = 'z'.repeat(4097)
+  const over = await call(getHandler, { method: 'POST', body: { config: { prompt: tooLong } } })
+  assert.equal(over.status, 400, '超过上限的 prompt 应被拒')
+  const payload = JSON.parse(over.body)
+  assert.ok(Array.isArray(payload.keys) && payload.keys.includes('prompt'), '回执要写明 prompt 被拒')
+  assert.equal(JSON.parse((await call(getHandler)).body).config.prompt, before, '被拒时保留旧值')
+
+  // 恰好等于上限要放行（不能把边界一起拒了）
+  const exact = 'q'.repeat(4096)
+  const ok = await call(getHandler, { method: 'POST', body: { config: { prompt: exact } } })
+  assert.equal(ok.status, 200, '等于上限的 prompt 应接受')
 }
 
 // 9) normalizeConfig 对覆盖层之后的值仍给出完整快照

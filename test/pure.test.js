@@ -308,3 +308,31 @@ test('finalizeCapture 对空内容与非字符串返回空串', () => {
   assert.equal(finalizeCapture(undefined), '')
   assert.equal(finalizeCapture(42), '')
 })
+
+// ---------------------------------------------------------------------------
+// 注入提示词的长度闸（审计 P1：prompt 无上限 → 可被塞任意长文本进 user 消息）
+// ---------------------------------------------------------------------------
+
+test('PROMPT_MAX_CHARS 是一个明确的正整数上限', () => {
+  assert.equal(typeof mod.PROMPT_MAX_CHARS, 'number')
+  assert.ok(Number.isInteger(mod.PROMPT_MAX_CHARS) && mod.PROMPT_MAX_CHARS > 0)
+})
+
+test('超长 prompt 在归一化时被截断到上限', () => {
+  const tooLong = 'x'.repeat(mod.PROMPT_MAX_CHARS + 500)
+  const cfg = mod.normalizeConfig({ prompt: tooLong })
+  assert.equal(cfg.prompt.length, mod.PROMPT_MAX_CHARS, '应截断到上限')
+  assert.notEqual(cfg.prompt.length, tooLong.length, '不得原样放行')
+})
+
+test('恰好等于上限的 prompt 不被截断', () => {
+  const exact = 'y'.repeat(mod.PROMPT_MAX_CHARS)
+  const cfg = mod.normalizeConfig({ prompt: exact })
+  assert.equal(cfg.prompt.length, mod.PROMPT_MAX_CHARS)
+})
+
+test('空 prompt 仍回落到内置默认，而不是留空串', () => {
+  const cfg = mod.normalizeConfig({ prompt: '   ' })
+  assert.ok(cfg.prompt.length > 0, '空提示词应回落默认')
+  assert.notEqual(cfg.prompt.trim(), '')
+})
