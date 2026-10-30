@@ -336,3 +336,24 @@ test('空 prompt 仍回落到内置默认，而不是留空串', () => {
   assert.ok(cfg.prompt.length > 0, '空提示词应回落默认')
   assert.notEqual(cfg.prompt.trim(), '')
 })
+
+// 截断点落在代理对中间时必须退一格，否则会留下孤立高代理项，
+// 写进会话后编码成 U+FFFD，用户看到提示词末尾凭空多一个乱码方块。
+test('截断不劈开代理对：切点落在 emoji 中间时退一格', () => {
+  const MAX = mod.PROMPT_MAX_CHARS
+  for (const prefix of ['a', '中', '']) {
+    const src = prefix + '😀'.repeat(MAX)
+    const out = mod.normalizeConfig({ prompt: src }).prompt
+    const last = out.charCodeAt(out.length - 1)
+    assert.equal(last >= 0xd800 && last <= 0xdbff, false, `前缀 ${JSON.stringify(prefix)} 产生了孤立高代理项`)
+    // 真正的验收判据：UTF-8 往返不得出现替换字符
+    assert.equal(Buffer.from(out, 'utf8').toString('utf8').includes('\uFFFD'), false)
+  }
+})
+
+test('截断结果仍不超上限（退一格后长度是 MAX 或 MAX-1）', () => {
+  const MAX = mod.PROMPT_MAX_CHARS
+  const out = mod.normalizeConfig({ prompt: 'a' + '😀'.repeat(MAX) }).prompt
+  assert.ok(out.length <= MAX, `截断后不得超上限，实际 ${out.length}`)
+  assert.ok(out.length >= MAX - 1, `只允许退一格，实际 ${out.length}`)
+})

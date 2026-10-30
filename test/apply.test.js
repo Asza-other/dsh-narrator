@@ -332,6 +332,29 @@ test('决策 kind 不是 enter 时绝不往里塞消息', async () => {
   await ctx.dispose()
 })
 
+// 上一条测不出事：reject 本就没有 messages 字段，塞进去也一样是 undefined。
+// 真正要锁住的是「决策自带 messages、但 kind 不是 enter」——那种情况下
+// 追加会直接把汇报塞进一个已被宿主否决的步骤里。
+test('非 enter 决策自带 messages 时也不得往里追加', async () => {
+  const ctx = makeCtx()
+  const agent = makeAgent()
+  apply(ctx, { silentSeconds: 0.05, cooldownSeconds: 0 })
+
+  fireStart(ctx, agent, { turn: 1, step: 1 })
+  await sleep(120)
+
+  const handlers = ctx.handlers.get('agent/pre-step')
+  const original = [{ role: 'user', content: '宿主自己的原始消息' }]
+  const reject = { kind: 'reject', messages: original }
+  const out = await handlers[0]({ agent, turn: 1, step: 2 }, async () => reject)
+
+  assert.equal(out, reject, '应原样透传同一个决策对象')
+  assert.equal(out.messages.length, 1, `不得追加消息，实际长度 ${out.messages.length}`)
+  assert.equal(out.messages[0].content, '宿主自己的原始消息', '不得改动既有消息')
+
+  await ctx.dispose()
+})
+
 test('注入成功后，模型说的第一段正文进入浮层记录', async () => {
   const ctx = makeCtx()
   const agent = makeAgent()
