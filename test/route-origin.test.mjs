@@ -45,7 +45,7 @@ apply(ctx, { silentSeconds: 60, cooldownSeconds: 60 })
 /** 发一个请求，返回 {status, body}。 */
 const call = (
   path,
-  { method = 'GET', origin, host = '127.0.0.1:61201', remote = '127.0.0.1', contentType, body } = {},
+  { method = 'GET', origin, host = '127.0.0.1:61201', remote = '127.0.0.1', contentType, body, secFetchSite } = {},
 ) =>
   new Promise((resolve) => {
     const handler = ctx._handlers.get(path)
@@ -54,6 +54,8 @@ const call = (
     if (origin !== undefined) headers.origin = origin
     if (host !== undefined) headers.host = host
     if (contentType !== undefined) headers['content-type'] = contentType
+    // 写路由要求浏览器来源：默认带上同源标记，专门的用例再显式去掉。
+    headers['sec-fetch-site'] = secFetchSite ?? 'same-origin'
     const chunks = body === undefined ? [] : [Buffer.from(body, 'utf8')]
     const req = {
       method,
@@ -218,4 +220,43 @@ for (const origin of ['http://evil.example', 'https://attacker.test:8443', 'null
   assert.equal(after, 120, '被 415 拒绝的请求不得写进配置')
 }
 
+
+// ---- 11) 写路由要求浏览器来源：无 Sec-Fetch-Site 一律 403 ---------------
+// 这一条针对审计 P1：宿主的 ?token= 只保护 /api/*，插件路由绕过了它，
+// 于是「同机任意进程 curl 一下就能改注入内容」。浏览器必带 Sec-Fetch-Site，
+// 本地脚本通常不带——这个差别不构成密码学隔离，但把门槛抬到「必须伪造」。
+{
+  const before = JSON.parse((await call('/api/narrator/config')).body).config.silentSeconds
+  const noHeader = await call('/api/narrator/config', {
+    method: 'POST',
+    contentType: 'application/json',
+    body: JSON.stringify({ config: { silentSeconds: 45 } }),
+    secFetchSite: '',
+  })
+  assert.equal(noHeader.status, 403, `无 Sec-Fetch-Site 的写请求应回 403，实际 ${noHeader.status}`)
+  assert.ok(noHeader.body.includes('write-requires-browser-origin'), noHeader.body)
+
+  const after = JSON.parse((await call('/api/narrator/config')).body).config.silentSeconds
+  assert.equal(after, before, '被 403 拒绝的请求不得写进配置')
+
+  // 明文有写尝试审计：被拒的那次要能在 /status 里看到
+  const status = JSON.parse((await call('/api/narrator/status')).body)
+  const attempts = status.writeAttempts ?? []
+  assert.ok(attempts.length > 0, '被拒的写尝试应进入审计尾巴')
+  assert.ok(attempts.some((a) => a.ok === false && a.why === 'not-browser'), '审计里应标 not-browser')
+}
+
+// ---- 12) 跨源的写请求即便带了 Sec-Fetch 也要被同源闸先挡住 ---------------
+{
+  const cross = await call('/api/narrator/config', {
+    method: 'POST',
+    origin: 'http://evil.example',
+    host: 'evil.example',
+    contentType: 'application/json',
+    body: JSON.stringify({ config: { silentSeconds: 99 } }),
+    secFetchSite: 'cross-site',
+  })
+  assert.equal(cross.status, 403, `跨源写请求应回 403，实际 ${cross.status}`)
+  assert.ok(cross.body.includes('cross-origin'), cross.body)
+}
 console.log('route-origin probe: 全部通过')
